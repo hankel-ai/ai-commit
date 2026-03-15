@@ -2,10 +2,12 @@
 """AI Commit Monitor GUI — Dear PyGui desktop app for monitoring git repos."""
 
 import argparse
+import json
 import os
 import queue
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -88,21 +90,6 @@ if sys.platform == "win32":
     _user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
     _user32.SetForegroundWindow.restype = ctypes.c_bool
 
-    # GetWindowRect
-    _user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    _user32.GetWindowRect.restype = ctypes.c_bool
-
-    # GetCursorPos
-    _user32.GetCursorPos.argtypes = [ctypes.c_void_p]
-    _user32.GetCursorPos.restype = ctypes.c_bool
-
-    # GetWindowLongW / SetWindowLongW (style manipulation)
-    _user32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
-    _user32.GetWindowLongW.restype = ctypes.c_long
-
-    _user32.SetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
-    _user32.SetWindowLongW.restype = ctypes.c_long
-
     # GetWindowThreadProcessId
     _user32.GetWindowThreadProcessId.argtypes = [
         ctypes.c_void_p, ctypes.POINTER(ctypes.wintypes.DWORD)
@@ -112,10 +99,6 @@ if sys.platform == "win32":
     # IsWindowVisible
     _user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
     _user32.IsWindowVisible.restype = ctypes.c_bool
-
-    # GetAsyncKeyState (poll physical button state — works regardless of GLFW)
-    _user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
-    _user32.GetAsyncKeyState.restype = ctypes.c_short
 
     # EnumWindows
     WNDENUMPROC = ctypes.WINFUNCTYPE(
@@ -152,7 +135,6 @@ class RepoState:
     status_tag: int = 0
     gen_btn_tag: int = 0
     accept_btn_tag: int = 0
-    regen_btn_tag: int = 0
 
 
 @dataclass
@@ -175,6 +157,7 @@ app = AppState()
 ui_queue = queue.Queue()
 executor = ThreadPoolExecutor(max_workers=4)
 _hwnd = None  # Cached viewport HWND (Windows)
+_window_hidden = False  # True when hidden to tray
 
 # Color palette
 COL_BG = (30, 30, 35)
@@ -185,11 +168,76 @@ COL_YELLOW = (220, 180, 60)
 COL_DIM = (120, 120, 130)
 COL_WHITE = (220, 220, 225)
 
-# Height of the custom title bar drag region (pixels from top of window)
-TITLEBAR_HEIGHT = 40
+_SETTINGS_FILE = Path(__file__).resolve().parent / "ai-commit-gui-settings.json"
+_ICON_FILE = Path(__file__).resolve().parent / "ai-commit-icon.ico"
 
-# Drag state: (cursor_start_x, cursor_start_y, win_start_x, win_start_y)
-_drag_start = None
+
+# ---------------------------------------------------------------------------
+# Window settings persistence
+# ---------------------------------------------------------------------------
+
+def _load_settings():
+    """Load saved window geometry. Returns dict or None."""
+    try:
+        return json.loads(_SETTINGS_FILE.read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def _save_settings():
+    """Save current viewport position, size, and app preferences."""
+    try:
+        pos = dpg.get_viewport_pos()
+        data = {
+            "x": int(pos[0]),
+            "y": int(pos[1]),
+            "width": dpg.get_viewport_width(),
+            "height": dpg.get_viewport_height(),
+            "auto_generate": app.auto_generate,
+            "always_on_top": app.always_on_top,
+            "poll_interval": app.poll_interval,
+        }
+        _SETTINGS_FILE.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Icon generation
+# ---------------------------------------------------------------------------
+
+_icon_image = None  # cached PIL Image for reuse by tray
+
+
+def _generate_icon():
+    """Create the app icon (.ico) using Pillow. Returns path string or empty."""
+    global _icon_image
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return ""
+
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    # Background: rounded blue square
+    draw.rounded_rectangle([2, 2, 62, 62], radius=12, fill=(100, 140, 230, 255))
+    # Git branch: vertical line with two commit dots
+    draw.line([(32, 14), (32, 50)], fill=(255, 255, 255, 220), width=3)
+    draw.ellipse([25, 12, 39, 26], fill=(255, 255, 255, 240))  # top commit
+    draw.ellipse([25, 38, 39, 52], fill=(255, 255, 255, 240))  # bottom commit
+    # Inner dots (the commit "holes")
+    draw.ellipse([29, 16, 35, 22], fill=(100, 140, 230, 255))
+    draw.ellipse([29, 42, 35, 48], fill=(100, 140, 230, 255))
+    # Side branch line
+    draw.line([(32, 20), (44, 30), (44, 38), (38, 44)], fill=(255, 255, 255, 200), width=2)
+
+    _icon_image = img
+
+    try:
+        img.save(str(_ICON_FILE), format="ICO", sizes=[(64, 64), (32, 32), (16, 16)])
+        return str(_ICON_FILE)
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -212,31 +260,10 @@ def _cache_hwnd():
             candidates.append(hwnd)
         return True
 
-    # prevent GC of the callback during EnumWindows
     cb = WNDENUMPROC(_enum_cb)
     _user32.EnumWindows(cb, None)
     if candidates:
         _hwnd = candidates[0]
-
-
-def _add_resize_border():
-    """Add WS_THICKFRAME so the frameless window gets resize handles."""
-    if not _hwnd:
-        return
-    GWL_STYLE = -16
-    WS_THICKFRAME = 0x00040000
-    style = _user32.GetWindowLongW(_hwnd, GWL_STYLE)
-    style |= WS_THICKFRAME
-    _user32.SetWindowLongW(_hwnd, GWL_STYLE, style)
-    # Force recalculation
-    SWP_FRAMECHANGED = 0x0020
-    SWP_NOMOVE = 0x0002
-    SWP_NOSIZE = 0x0001
-    SWP_NOZORDER = 0x0004
-    _user32.SetWindowPos(
-        _hwnd, None, 0, 0, 0, 0,
-        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
-    )
 
 
 def _set_topmost(on_top):
@@ -249,24 +276,27 @@ def _set_topmost(on_top):
     SWP_NOSIZE = 0x0001
     SWP_NOACTIVATE = 0x0010
     flag = HWND_TOPMOST if on_top else HWND_NOTOPMOST
-    ret = _user32.SetWindowPos(
+    _user32.SetWindowPos(
         _hwnd, flag, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
     )
-    if _debug_mode:
-        print(f"[debug] SetWindowPos(topmost={on_top}) returned {ret}", flush=True)
 
 
 def _hide_window():
     """Hide the viewport entirely (removes from taskbar too)."""
+    global _window_hidden
     if _hwnd:
         _user32.ShowWindow(_hwnd, 0)  # SW_HIDE
+        _window_hidden = True
 
 
 def _show_window():
     """Show the viewport and bring it to front."""
+    global _window_hidden
     if _hwnd:
         _user32.ShowWindow(_hwnd, 5)  # SW_SHOW
         _user32.SetForegroundWindow(_hwnd)
+        _window_hidden = False
+        _set_tray_alert(False)  # clear indicator
         if app.always_on_top:
             _set_topmost(True)
 
@@ -294,6 +324,8 @@ def create_theme():
             dpg.add_theme_color(dpg.mvThemeCol_ScrollbarGrab, (60, 60, 75))
             dpg.add_theme_color(dpg.mvThemeCol_CheckMark, COL_ACCENT)
             dpg.add_theme_color(dpg.mvThemeCol_Separator, (55, 55, 65))
+            dpg.add_theme_color(dpg.mvThemeCol_TitleBg, (30, 30, 35))
+            dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive, (40, 42, 55))
             dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 6, 4)
             dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 6, 3)
             dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 3)
@@ -359,63 +391,6 @@ def bg_commit_and_push(repo_name, message):
 
 
 # ---------------------------------------------------------------------------
-# Drag-to-move — initial click via DPG, ongoing drag polled via Win32
-# in the render loop (bypasses GLFW mouse tracking entirely).
-# ---------------------------------------------------------------------------
-
-VK_LBUTTON = 0x01
-
-def mouse_down_handler(sender, app_data):
-    """On left-click in the title bar, record start positions for drag."""
-    global _drag_start
-    if sys.platform != "win32" or not _hwnd:
-        return
-    # Check if cursor is in title bar using Win32 screen coordinates
-    pt = ctypes.wintypes.POINT()
-    _user32.GetCursorPos(ctypes.byref(pt))
-    rect = ctypes.wintypes.RECT()
-    _user32.GetWindowRect(_hwnd, ctypes.byref(rect))
-    if pt.y - rect.top >= TITLEBAR_HEIGHT:
-        return
-    if pt.x < rect.left or pt.x > rect.right:
-        return
-    # Don't drag if clicking title bar buttons
-    try:
-        if (dpg.is_item_hovered("minimize_btn") or
-                dpg.is_item_hovered("close_btn")):
-            return
-    except Exception:
-        pass
-    _drag_start = (pt.x, pt.y, rect.left, rect.top)
-
-
-def _poll_drag():
-    """Called every frame from the render loop. Moves the window while
-    the left mouse button is physically held down. Uses GetAsyncKeyState
-    and GetCursorPos — completely independent of GLFW/DPG mouse tracking.
-    """
-    global _drag_start
-    if _drag_start is None or not _hwnd:
-        return
-    # Check if left mouse button is still physically pressed
-    if not (_user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000):
-        _drag_start = None
-        return
-    pt = ctypes.wintypes.POINT()
-    _user32.GetCursorPos(ctypes.byref(pt))
-    sx, sy, wx, wy = _drag_start
-    new_x = wx + (pt.x - sx)
-    new_y = wy + (pt.y - sy)
-    SWP_NOSIZE = 0x0001
-    SWP_NOZORDER = 0x0004
-    SWP_NOACTIVATE = 0x0010
-    _user32.SetWindowPos(
-        _hwnd, None, new_x, new_y, 0, 0,
-        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-    )
-
-
-# ---------------------------------------------------------------------------
 # UI callbacks
 # ---------------------------------------------------------------------------
 
@@ -467,6 +442,9 @@ def cb_generate(sender, app_data, user_data):
         return
     rs.gen_status = GenStatus.GENERATING
     rs.error_message = ""
+    rs.commit_message = ""
+    if rs.input_tag and dpg.does_item_exist(rs.input_tag):
+        dpg.set_value(rs.input_tag, "")
     update_repo_status(rs)
     executor.submit(bg_generate_message, repo_name)
 
@@ -487,29 +465,10 @@ def cb_accept(sender, app_data, user_data):
     executor.submit(bg_commit_and_push, repo_name, message)
 
 
-def cb_regen(sender, app_data, user_data):
-    repo_name = user_data
-    rs = app.repos.get(repo_name)
-    if not rs or not rs.entries:
-        return
-    rs.gen_status = GenStatus.GENERATING
-    rs.error_message = ""
-    rs.commit_message = ""
-    dpg.set_value(rs.input_tag, "")
-    update_repo_status(rs)
-    executor.submit(bg_generate_message, repo_name)
 
-
-def cb_minimize(sender, app_data):
-    dpg.minimize_viewport()
-
-
-def cb_close(sender, app_data):
-    """Hide to tray if available, otherwise quit."""
-    if _has_tray and sys.platform == "win32":
-        _hide_window()
-    else:
-        dpg.stop_dearpygui()
+def cb_hide_to_tray(sender, app_data):
+    """Hide to system tray."""
+    _hide_window()
 
 
 # ---------------------------------------------------------------------------
@@ -518,23 +477,54 @@ def cb_close(sender, app_data):
 
 tray_icon = None
 _has_tray = False
+_tray_alert_active = False
+_tray_icon_normal = None
+_tray_icon_alert = None
+
+
+def _make_alert_icon(base_img):
+    """Return a copy of *base_img* with an orange dot in the top-right corner."""
+    try:
+        from PIL import ImageDraw
+    except ImportError:
+        return base_img
+    img = base_img.copy()
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([40, 2, 62, 24], fill=(255, 140, 0, 255))  # orange dot
+    draw.ellipse([44, 6, 58, 20], fill=(255, 180, 40, 255))  # lighter center
+    return img
+
+
+def _set_tray_alert(on):
+    """Toggle the tray icon between normal and alert (orange dot) variants."""
+    global _tray_alert_active
+    if not tray_icon or not _tray_icon_normal:
+        return
+    if on and not _tray_alert_active:
+        tray_icon.icon = _tray_icon_alert or _tray_icon_normal
+        tray_icon.title = "AI Commit Monitor — changes detected"
+        _tray_alert_active = True
+    elif not on and _tray_alert_active:
+        tray_icon.icon = _tray_icon_normal
+        tray_icon.title = "AI Commit Monitor"
+        _tray_alert_active = False
 
 
 def setup_tray():
-    global tray_icon, _has_tray
+    global tray_icon, _has_tray, _tray_icon_normal, _tray_icon_alert
     try:
         import pystray
-        from PIL import Image, ImageDraw
+        from PIL import Image
     except ImportError:
         return
 
-    # Simple icon: blue rounded rect with white lines
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle([4, 4, 60, 60], radius=10, fill=(100, 140, 230, 255))
-    draw.rounded_rectangle([14, 18, 50, 26], radius=2, fill=(255, 255, 255, 200))
-    draw.rounded_rectangle([14, 30, 42, 38], radius=2, fill=(255, 255, 255, 200))
-    draw.rounded_rectangle([14, 42, 36, 50], radius=2, fill=(255, 255, 255, 200))
+    if _icon_image:
+        img = _icon_image.copy()
+    else:
+        img = Image.new("RGBA", (64, 64), (100, 140, 230, 255))
+
+    _tray_icon_normal = img
+    _tray_icon_alert = _make_alert_icon(img)
 
     def on_show(icon, item):
         ui_queue.put(("tray_show", None))
@@ -606,12 +596,17 @@ def build_repo_section(rs, parent):
     # Commit message input
     if rs.entries:
         dpg.add_spacer(height=2, parent=rs.header_tag)
+        wrapped = _wrap_message(rs.commit_message) if rs.commit_message else ""
+        if wrapped and wrapped != rs.commit_message:
+            rs.commit_message = wrapped
+        input_h = _height_for_text(wrapped) if wrapped else 60
         rs.input_tag = dpg.add_input_text(
             default_value=rs.commit_message,
             hint="Commit message...",
             multiline=True,
-            height=50,
+            height=input_h,
             width=-1,
+            tab_input=False,
             parent=rs.header_tag,
         )
 
@@ -623,8 +618,6 @@ def build_repo_section(rs, parent):
         with dpg.group(horizontal=True, parent=rs.header_tag):
             rs.gen_btn_tag = dpg.add_button(label="Generate", callback=cb_generate, user_data=rs.name)
             rs.accept_btn_tag = dpg.add_button(label="Accept & Push", callback=cb_accept, user_data=rs.name)
-            rs.regen_btn_tag = dpg.add_button(label="Regen", callback=cb_regen, user_data=rs.name)
-
             dpg.bind_item_theme(rs.accept_btn_tag, green_btn_theme)
 
         dpg.add_spacer(height=4, parent=rs.header_tag)
@@ -633,50 +626,113 @@ def build_repo_section(rs, parent):
         rs.input_tag = 0
 
 
+def _get_wrap_width():
+    """Estimate how many characters fit in one line of the input widget."""
+    try:
+        vp_width = dpg.get_viewport_width()
+    except Exception:
+        vp_width = 520
+    # Subtract window padding (8*2), frame padding (6*2), scrollbar (12), borders
+    text_px = vp_width - 48
+    char_px = 7.5  # approx monospace char width in DPG default font
+    return max(40, int(text_px / char_px))
+
+
+def _wrap_message(text):
+    """Wrap a commit message to fit the current viewport width."""
+    if not text:
+        return text
+    width = _get_wrap_width()
+    out = []
+    for line in text.split("\n"):
+        if len(line) <= width:
+            out.append(line)
+        else:
+            out.extend(textwrap.wrap(line, width=width,
+                                     break_long_words=False,
+                                     break_on_hyphens=False) or [""])
+    return "\n".join(out)
+
+
+def _height_for_text(text):
+    """Return pixel height that fits *text* with no extra blank space."""
+    if not text:
+        return 60
+    num_lines = text.count("\n") + 1
+    # ~18px per line + small top/bottom padding
+    return max(60, min(300, num_lines * 18 + 14))
+
+
 def rebuild_repos_ui(results):
-    """Rebuild repo sections from poll results, preserving user-edited messages."""
-    # Preserve existing commit messages the user may have typed
-    preserved_messages = {}
+    """Rebuild repo sections from poll results.
+
+    If a repo's file list changed since last poll, its pending commit message
+    is erased (and auto-generated again if that setting is on).  If the files
+    are unchanged, the existing message is preserved.
+    """
+    preserved = {}  # name -> (message, gen_status, error_message)
     for name, rs in app.repos.items():
+        msg = ""
         if rs.input_tag and dpg.does_item_exist(rs.input_tag):
-            preserved_messages[name] = dpg.get_value(rs.input_tag)
+            msg = dpg.get_value(rs.input_tag)
         elif rs.commit_message:
-            preserved_messages[name] = rs.commit_message
+            msg = rs.commit_message
+        preserved[name] = (msg, rs.gen_status, rs.error_message)
 
-    # Preserve gen_status for repos that are still generating
-    preserved_status = {}
-    for name, rs in app.repos.items():
-        if rs.gen_status == GenStatus.GENERATING:
-            preserved_status[name] = rs.gen_status
-
-    # Clear existing repo widgets
     if dpg.does_item_exist("repos_container"):
         dpg.delete_item("repos_container", children_only=True)
 
-    # Update app.repos
     new_repos = {}
-    for name, info in sorted(results.items()):
+    any_changes = False
+    for name, info in sorted(results.items(), key=lambda x: x[0].lower()):
         old_rs = app.repos.get(name)
+        new_entries = info["entries"]
+
+        # Detect whether files changed since last poll
+        files_changed = True
+        if old_rs is not None:
+            files_changed = (old_rs.entries != new_entries)
+
+        if new_entries:
+            any_changes = True
+
+        # Decide what to keep
+        if files_changed or name not in preserved:
+            msg = ""
+            gen = GenStatus.IDLE
+            err = ""
+        else:
+            prev_msg, prev_gen, prev_err = preserved[name]
+            # Keep message only if still generating or files haven't changed
+            if prev_gen == GenStatus.GENERATING:
+                msg, gen, err = prev_msg, prev_gen, prev_err
+            else:
+                msg, gen, err = prev_msg, (GenStatus.DONE if prev_msg else GenStatus.IDLE), prev_err
+
         rs = RepoState(
             path=info["path"],
             name=name,
-            entries=info["entries"],
-            commit_message=preserved_messages.get(name, ""),
-            gen_status=preserved_status.get(name, GenStatus.DONE if preserved_messages.get(name) else GenStatus.IDLE),
-            error_message=old_rs.error_message if old_rs else "",
+            entries=new_entries,
+            commit_message=msg,
+            gen_status=gen,
+            error_message=err,
         )
         new_repos[name] = rs
         build_repo_section(rs, "repos_container")
 
     app.repos = new_repos
 
-    # Auto-generate for repos with changes and no message yet
-    if app.auto_generate:
-        for name, rs in app.repos.items():
-            if rs.entries and not rs.commit_message and rs.gen_status == GenStatus.IDLE:
+    # Auto-generate for repos with changes and no message
+    for name, rs in app.repos.items():
+        if rs.entries and not rs.commit_message and rs.gen_status == GenStatus.IDLE:
+            if app.auto_generate:
                 rs.gen_status = GenStatus.GENERATING
                 update_repo_status(rs)
                 executor.submit(bg_generate_message, name)
+
+    # Notify tray if window is hidden and there are repos with changes
+    if _window_hidden and any_changes:
+        _set_tray_alert(True)
 
 
 # ---------------------------------------------------------------------------
@@ -711,7 +767,10 @@ def process_queue():
                 rs.commit_message = message
                 rs.error_message = ""
                 if rs.input_tag and dpg.does_item_exist(rs.input_tag):
-                    dpg.set_value(rs.input_tag, message)
+                    wrapped = _wrap_message(message)
+                    rs.commit_message = wrapped
+                    dpg.set_value(rs.input_tag, wrapped)
+                    dpg.configure_item(rs.input_tag, height=_height_for_text(wrapped))
             update_repo_status(rs)
 
         elif kind == "commit_result":
@@ -770,20 +829,39 @@ def main():
     app.watched_folder = Path(args.folder).resolve()
     app.model = args.model
     app.ollama_url = args.url
-    app.poll_interval = args.poll
-    app.always_on_top = args.topmost
 
     dpg.create_context()
 
-    # Frameless viewport (no OS title bar — we draw our own)
-    dpg.create_viewport(
-        title="AI Commit Monitor",
-        width=520,
-        height=600,
-        min_width=400,
-        min_height=300,
-        decorated=False,
-    )
+    # Load saved settings (CLI args override where specified)
+    saved = _load_settings()
+    vp_width = saved.get("width", 520) if saved else 520
+    vp_height = saved.get("height", 600) if saved else 600
+
+    # Restore preferences from disk, then let CLI flags override
+    if saved:
+        app.auto_generate = saved.get("auto_generate", False)
+        app.always_on_top = saved.get("always_on_top", False)
+        app.poll_interval = saved.get("poll_interval", 30)
+    if args.topmost:
+        app.always_on_top = True
+    if args.poll != 30:  # user explicitly passed --poll
+        app.poll_interval = args.poll
+
+    # Generate app icon
+    icon_path = _generate_icon()
+
+    vp_kwargs = {
+        "title": "AI Commit Monitor",
+        "width": vp_width,
+        "height": vp_height,
+        "min_width": 400,
+        "min_height": 300,
+        "decorated": True,
+    }
+    if icon_path:
+        vp_kwargs["small_icon"] = icon_path
+        vp_kwargs["large_icon"] = icon_path
+    dpg.create_viewport(**vp_kwargs)
 
     # Theme
     global_theme = create_theme()
@@ -801,28 +879,9 @@ def main():
     ):
         pass
 
-    # Mouse-down handler to initiate drag (ongoing drag is polled in render loop)
-    with dpg.handler_registry():
-        dpg.add_mouse_down_handler(button=dpg.mvMouseButton_Left,
-                                   callback=mouse_down_handler)
-
     # Main window
     with dpg.window(tag="primary", no_title_bar=True, no_resize=False,
                     no_move=True, no_close=True):
-
-        # Custom title bar (drag anywhere in this region to move)
-        with dpg.group(horizontal=True):
-            dpg.add_text("AI Commit Monitor", color=COL_ACCENT)
-            dpg.add_spacer(width=-1)
-
-        with dpg.group(horizontal=True):
-            dpg.add_spacer(width=-1)
-            dpg.add_button(label=" - ", callback=cb_minimize, width=30,
-                           tag="minimize_btn")
-            dpg.add_button(label=" X ", callback=cb_close, width=30,
-                           tag="close_btn")
-
-        dpg.add_separator()
 
         # Settings bar
         with dpg.group(horizontal=True):
@@ -845,6 +904,9 @@ def main():
             dpg.add_spacer(width=10)
             dpg.add_checkbox(label="Always on top", default_value=app.always_on_top,
                              callback=cb_always_on_top)
+            dpg.add_spacer(width=10)
+            dpg.add_button(label="Hide to Tray", callback=cb_hide_to_tray,
+                           tag="tray_btn", show=False)
 
         dpg.add_separator()
 
@@ -858,14 +920,17 @@ def main():
     dpg.setup_dearpygui()
     dpg.show_viewport()
 
-    # Let the window fully materialise before touching Win32 APIs
+    # Restore saved position
+    if saved and "x" in saved and "y" in saved:
+        dpg.set_viewport_pos([saved["x"], saved["y"]])
+
+    # Cache HWND for always-on-top and tray operations
     _hwnd_ready = False
     if sys.platform == "win32":
         for _ in range(10):
             dpg.render_dearpygui_frame()
         _cache_hwnd()
         if _hwnd:
-            _add_resize_border()
             if app.always_on_top:
                 _set_topmost(True)
             _hwnd_ready = True
@@ -874,6 +939,8 @@ def main():
 
     # System tray
     setup_tray()
+    if _has_tray:
+        dpg.configure_item("tray_btn", show=True)
 
     # Initial poll
     trigger_poll()
@@ -883,20 +950,13 @@ def main():
     while dpg.is_dearpygui_running():
         process_queue()
 
-        # Poll-based drag (runs outside GLFW event processing)
-        if sys.platform == "win32":
-            _poll_drag()
-
         # Retry HWND detection if it failed at startup
         if sys.platform == "win32" and not _hwnd_ready and _hwnd_retry_count < 60:
             _cache_hwnd()
             if _hwnd:
-                _add_resize_border()
                 if app.always_on_top:
                     _set_topmost(True)
                 _hwnd_ready = True
-                if _debug_mode:
-                    print(f"[debug] HWND={_hwnd} found on retry {_hwnd_retry_count}", flush=True)
             _hwnd_retry_count += 1
 
         now = time.time()
@@ -904,6 +964,9 @@ def main():
             trigger_poll()
 
         dpg.render_dearpygui_frame()
+
+    # Save window geometry before cleanup
+    _save_settings()
 
     # Cleanup
     executor.shutdown(wait=False)
