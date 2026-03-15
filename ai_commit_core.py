@@ -51,14 +51,17 @@ def run_git(args, cwd):
 
 
 def is_git_repo(path):
-    rc, _, _ = run_git(["rev-parse", "--is-inside-work-tree"], cwd=path)
-    return rc == 0
+    """Return True only if *path* is the root of a git repository."""
+    rc, stdout, _ = run_git(["rev-parse", "--show-toplevel"], cwd=path)
+    if rc != 0:
+        return False
+    return Path(stdout.strip()).resolve() == Path(path).resolve()
 
 
 def _unquote_path(p):
     """Strip the quotes git adds around paths containing spaces/specials."""
     if len(p) >= 2 and p.startswith('"') and p.endswith('"'):
-        return p[1:-1].encode("utf-8").decode("unicode_escape")
+        return p[1:-1]
     return p
 
 
@@ -192,11 +195,17 @@ def do_commit_and_push(cwd, message):
 # ---------------------------------------------------------------------------
 
 def discover_repos(folder):
-    """Scan direct children of *folder* and return paths that are git repos."""
-    folder = Path(folder)
-    repos = []
+    """Return git repo paths to monitor.
+
+    If *folder* itself is a repo root, return just that.
+    Otherwise scan its direct children for repo roots.
+    """
+    folder = Path(folder).resolve()
     if not folder.is_dir():
-        return repos
+        return []
+    if is_git_repo(folder):
+        return [folder]
+    repos = []
     for child in sorted(folder.iterdir()):
         if child.is_dir() and not child.name.startswith("."):
             if is_git_repo(child):
