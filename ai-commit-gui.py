@@ -131,6 +131,16 @@ if sys.platform == "win32":
     _user32.EnumWindows.argtypes = [WNDENUMPROC, ctypes.c_void_p]
     _user32.EnumWindows.restype = ctypes.c_bool
 
+    # DwmSetWindowAttribute — dark title bar
+    _dwmapi = ctypes.windll.dwmapi
+    _dwmapi.DwmSetWindowAttribute.argtypes = [
+        ctypes.c_void_p,   # HWND
+        ctypes.c_ulong,    # DWORD dwAttribute
+        ctypes.c_void_p,   # LPCVOID pvAttribute
+        ctypes.c_ulong,    # DWORD cbAttribute
+    ]
+    _dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -291,6 +301,19 @@ def _cache_hwnd():
     _user32.EnumWindows(cb, None)
     if candidates:
         _hwnd = candidates[0]
+        _set_dark_title_bar()
+
+
+def _set_dark_title_bar():
+    """Enable the immersive dark-mode title bar via DwmSetWindowAttribute."""
+    if not _hwnd or sys.platform != "win32":
+        return
+    DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+    value = ctypes.c_int(1)
+    _dwmapi.DwmSetWindowAttribute(
+        _hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
+        ctypes.byref(value), ctypes.sizeof(value),
+    )
 
 
 def _set_topmost(on_top):
