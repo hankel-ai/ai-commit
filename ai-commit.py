@@ -236,6 +236,10 @@ def parse_args():
         "--test", action="store_true",
         help="Test mode: check Ollama connectivity, generate message, but don't commit",
     )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Show the full git diff sent to the LLM",
+    )
     return parser.parse_args()
 
 
@@ -266,6 +270,12 @@ def main():
     if not diff.strip():
         print("No diff content to send — nothing meaningful to commit.")
         sys.exit(0)
+
+    if args.debug:
+        print("─" * 60)
+        print("DEBUG — diff sent to LLM:\n")
+        print(diff)
+        print("\n" + "─" * 60)
 
     print(f"Generating commit message with {config['model']}...")
     message = generate_message(diff, config)

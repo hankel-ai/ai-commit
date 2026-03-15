@@ -30,6 +30,9 @@ python ai-commit.py --model mistral
 
 # Test Ollama connectivity without committing
 python ai-commit.py --test
+
+# Show the diff being sent to the LLM
+python ai-commit.py --debug
 ```
 
 ## Options
@@ -40,6 +43,7 @@ python ai-commit.py --test
 | `--model` | `AI_COMMIT_MODEL` | `qwen3-coder:480b-cloud` | Ollama model name |
 | `--url` | `AI_COMMIT_URL` | `http://localhost:11434` | Ollama base URL |
 | `--test` | — | off | Generate message only, don't commit |
+| `--debug` | — | off | Print the full diff sent to the LLM |
 
 ## Interactive prompt
 
