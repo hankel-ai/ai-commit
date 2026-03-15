@@ -18,11 +18,15 @@ from pathlib import Path
 # Pass --no-detach to keep it attached (useful for debugging).
 # ---------------------------------------------------------------------------
 
+_debug_mode = False
+
 def _maybe_detach():
+    global _debug_mode
     if sys.platform != "win32":
         return
     if "--no-detach" in sys.argv:
         sys.argv.remove("--no-detach")
+        _debug_mode = True
         return
     if os.environ.get("_AI_COMMIT_GUI_CHILD"):
         return
@@ -126,22 +130,29 @@ TITLEBAR_HEIGHT = 40
 # ---------------------------------------------------------------------------
 
 def _cache_hwnd():
-    """Find and cache the viewport HWND."""
+    """Find and cache the viewport HWND using EnumWindows (most reliable)."""
     global _hwnd
     if sys.platform != "win32":
         return
-    # Method 1: FindWindowW by title
-    hwnd = ctypes.windll.user32.FindWindowW(None, "AI Commit Monitor")
-    if hwnd:
-        _hwnd = hwnd
-        return
-    # Method 2: foreground window, verified by process ID
-    hwnd = ctypes.windll.user32.GetForegroundWindow()
-    if hwnd:
+
+    pid = os.getpid()
+    WNDENUMPROC = ctypes.WINFUNCTYPE(
+        ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM
+    )
+    candidates = []
+
+    def _enum_cb(hwnd, _lparam):
         proc_id = ctypes.wintypes.DWORD()
-        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(proc_id))
-        if proc_id.value == os.getpid():
-            _hwnd = hwnd
+        ctypes.windll.user32.GetWindowThreadProcessId(
+            hwnd, ctypes.byref(proc_id)
+        )
+        if proc_id.value == pid and ctypes.windll.user32.IsWindowVisible(hwnd):
+            candidates.append(hwnd)
+        return True
+
+    ctypes.windll.user32.EnumWindows(WNDENUMPROC(_enum_cb), 0)
+    if candidates:
+        _hwnd = candidates[0]
 
 
 def _add_resize_border():
@@ -761,13 +772,18 @@ def main():
     dpg.show_viewport()
 
     # Let the window fully materialise before touching Win32 APIs
+    _hwnd_ready = False
     if sys.platform == "win32":
-        for _ in range(5):
+        for _ in range(10):
             dpg.render_dearpygui_frame()
         _cache_hwnd()
-        _add_resize_border()
-        if app.always_on_top:
-            _set_topmost(True)
+        if _hwnd:
+            _add_resize_border()
+            if app.always_on_top:
+                _set_topmost(True)
+            _hwnd_ready = True
+        if _debug_mode:
+            print(f"[debug] HWND={_hwnd} ready={_hwnd_ready}", flush=True)
 
     # System tray
     setup_tray()
@@ -776,8 +792,19 @@ def main():
     trigger_poll()
 
     # Render loop
+    _hwnd_retry_count = 0
     while dpg.is_dearpygui_running():
         process_queue()
+
+        # Retry HWND detection if it failed at startup
+        if sys.platform == "win32" and not _hwnd_ready and _hwnd_retry_count < 30:
+            _cache_hwnd()
+            if _hwnd:
+                _add_resize_border()
+                if app.always_on_top:
+                    _set_topmost(True)
+                _hwnd_ready = True
+            _hwnd_retry_count += 1
 
         now = time.time()
         if now - app.last_poll >= app.poll_interval:
