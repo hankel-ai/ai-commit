@@ -55,10 +55,70 @@ from ai_commit_core import (
     get_status,
 )
 
-# Win32 API (Windows only)
+# ---------------------------------------------------------------------------
+# Win32 API setup (Windows only) — declare argtypes so ctypes handles
+# 64-bit HWND / pointer values correctly.
+# ---------------------------------------------------------------------------
+
+_user32 = None
+
 if sys.platform == "win32":
     import ctypes
     import ctypes.wintypes
+
+    _user32 = ctypes.windll.user32
+
+    # SetWindowPos
+    _user32.SetWindowPos.argtypes = [
+        ctypes.c_void_p,   # HWND hWnd
+        ctypes.c_void_p,   # HWND hWndInsertAfter
+        ctypes.c_int,      # int X
+        ctypes.c_int,      # int Y
+        ctypes.c_int,      # int cx
+        ctypes.c_int,      # int cy
+        ctypes.c_uint,     # UINT uFlags
+    ]
+    _user32.SetWindowPos.restype = ctypes.c_bool
+
+    # ShowWindow
+    _user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    _user32.ShowWindow.restype = ctypes.c_bool
+
+    # SetForegroundWindow
+    _user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+    _user32.SetForegroundWindow.restype = ctypes.c_bool
+
+    # GetWindowRect
+    _user32.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    _user32.GetWindowRect.restype = ctypes.c_bool
+
+    # GetCursorPos
+    _user32.GetCursorPos.argtypes = [ctypes.c_void_p]
+    _user32.GetCursorPos.restype = ctypes.c_bool
+
+    # GetWindowLongW / SetWindowLongW (style manipulation)
+    _user32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    _user32.GetWindowLongW.restype = ctypes.c_long
+
+    _user32.SetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
+    _user32.SetWindowLongW.restype = ctypes.c_long
+
+    # GetWindowThreadProcessId
+    _user32.GetWindowThreadProcessId.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.wintypes.DWORD)
+    ]
+    _user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
+
+    # IsWindowVisible
+    _user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+    _user32.IsWindowVisible.restype = ctypes.c_bool
+
+    # EnumWindows
+    WNDENUMPROC = ctypes.WINFUNCTYPE(
+        ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p
+    )
+    _user32.EnumWindows.argtypes = [WNDENUMPROC, ctypes.c_void_p]
+    _user32.EnumWindows.restype = ctypes.c_bool
 
 
 # ---------------------------------------------------------------------------
@@ -124,53 +184,53 @@ COL_WHITE = (220, 220, 225)
 # Height of the custom title bar drag region (pixels from top of window)
 TITLEBAR_HEIGHT = 40
 
+# Drag state: (cursor_start_x, cursor_start_y, win_start_x, win_start_y)
+_drag_start = None
+
 
 # ---------------------------------------------------------------------------
 # Win32 helpers
 # ---------------------------------------------------------------------------
 
 def _cache_hwnd():
-    """Find and cache the viewport HWND using EnumWindows (most reliable)."""
+    """Find and cache the viewport HWND using EnumWindows."""
     global _hwnd
     if sys.platform != "win32":
         return
 
     pid = os.getpid()
-    WNDENUMPROC = ctypes.WINFUNCTYPE(
-        ctypes.c_bool, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM
-    )
     candidates = []
 
     def _enum_cb(hwnd, _lparam):
         proc_id = ctypes.wintypes.DWORD()
-        ctypes.windll.user32.GetWindowThreadProcessId(
-            hwnd, ctypes.byref(proc_id)
-        )
-        if proc_id.value == pid and ctypes.windll.user32.IsWindowVisible(hwnd):
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(proc_id))
+        if proc_id.value == pid and _user32.IsWindowVisible(hwnd):
             candidates.append(hwnd)
         return True
 
-    ctypes.windll.user32.EnumWindows(WNDENUMPROC(_enum_cb), 0)
+    # prevent GC of the callback during EnumWindows
+    cb = WNDENUMPROC(_enum_cb)
+    _user32.EnumWindows(cb, None)
     if candidates:
         _hwnd = candidates[0]
 
 
 def _add_resize_border():
-    """Add WS_THICKFRAME so the frameless window gets resize handles on edges."""
+    """Add WS_THICKFRAME so the frameless window gets resize handles."""
     if not _hwnd:
         return
     GWL_STYLE = -16
     WS_THICKFRAME = 0x00040000
-    style = ctypes.windll.user32.GetWindowLongW(_hwnd, GWL_STYLE)
+    style = _user32.GetWindowLongW(_hwnd, GWL_STYLE)
     style |= WS_THICKFRAME
-    ctypes.windll.user32.SetWindowLongW(_hwnd, GWL_STYLE, style)
-    # Force recalculation of non-client area
+    _user32.SetWindowLongW(_hwnd, GWL_STYLE, style)
+    # Force recalculation
     SWP_FRAMECHANGED = 0x0020
     SWP_NOMOVE = 0x0002
     SWP_NOSIZE = 0x0001
     SWP_NOZORDER = 0x0004
-    ctypes.windll.user32.SetWindowPos(
-        _hwnd, 0, 0, 0, 0, 0,
+    _user32.SetWindowPos(
+        _hwnd, None, 0, 0, 0, 0,
         SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
     )
 
@@ -179,46 +239,32 @@ def _set_topmost(on_top):
     """Set or clear the TOPMOST flag via Win32."""
     if not _hwnd:
         return
-    HWND_TOPMOST = -1
-    HWND_NOTOPMOST = -2
+    HWND_TOPMOST = ctypes.c_void_p(-1)
+    HWND_NOTOPMOST = ctypes.c_void_p(-2)
     SWP_NOMOVE = 0x0002
     SWP_NOSIZE = 0x0001
     SWP_NOACTIVATE = 0x0010
     flag = HWND_TOPMOST if on_top else HWND_NOTOPMOST
-    ctypes.windll.user32.SetWindowPos(
+    ret = _user32.SetWindowPos(
         _hwnd, flag, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
     )
+    if _debug_mode:
+        print(f"[debug] SetWindowPos(topmost={on_top}) returned {ret}", flush=True)
 
 
 def _hide_window():
     """Hide the viewport entirely (removes from taskbar too)."""
     if _hwnd:
-        ctypes.windll.user32.ShowWindow(_hwnd, 0)  # SW_HIDE
+        _user32.ShowWindow(_hwnd, 0)  # SW_HIDE
 
 
 def _show_window():
     """Show the viewport and bring it to front."""
     if _hwnd:
-        ctypes.windll.user32.ShowWindow(_hwnd, 5)  # SW_SHOW
-        ctypes.windll.user32.SetForegroundWindow(_hwnd)
+        _user32.ShowWindow(_hwnd, 5)  # SW_SHOW
+        _user32.SetForegroundWindow(_hwnd)
         if app.always_on_top:
             _set_topmost(True)
-
-
-def _begin_drag():
-    """Initiate a native Win32 title-bar drag.
-
-    ReleaseCapture() releases DPG/GLFW's mouse capture, then
-    SendMessageW(WM_NCLBUTTONDOWN, HTCAPTION) tells Windows the user
-    grabbed the caption bar.  Windows runs its own modal drag loop —
-    smooth, snaps to screen edges, identical to a normal window.
-    """
-    if not _hwnd:
-        return
-    ctypes.windll.user32.ReleaseCapture()
-    WM_NCLBUTTONDOWN = 0x00A1
-    HTCAPTION = 2
-    ctypes.windll.user32.SendMessageW(_hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -309,23 +355,55 @@ def bg_commit_and_push(repo_name, message):
 
 
 # ---------------------------------------------------------------------------
-# Drag-to-move handler
+# Drag-to-move handlers (pure Win32 — no DPG coordinate functions)
 # ---------------------------------------------------------------------------
 
 def mouse_down_handler(sender, app_data):
-    """On left-click in the title bar region, start a native Win32 drag."""
+    """On left-click in the title bar, record start positions for drag."""
+    global _drag_start
     if sys.platform != "win32" or not _hwnd:
         return
+    # Use DPG mouse pos ONLY to check if click is in title bar region
     mouse_pos = dpg.get_mouse_pos(local=False)
-    if mouse_pos[1] < TITLEBAR_HEIGHT:
-        # Don't start drag if clicking on title bar buttons
-        try:
-            if (dpg.is_item_hovered("minimize_btn") or
-                    dpg.is_item_hovered("close_btn")):
-                return
-        except Exception:
-            pass
-        _begin_drag()
+    if mouse_pos[1] >= TITLEBAR_HEIGHT:
+        return
+    # Don't drag if clicking title bar buttons
+    try:
+        if (dpg.is_item_hovered("minimize_btn") or
+                dpg.is_item_hovered("close_btn")):
+            return
+    except Exception:
+        pass
+    # Capture cursor and window positions via Win32
+    pt = ctypes.wintypes.POINT()
+    _user32.GetCursorPos(ctypes.byref(pt))
+    rect = ctypes.wintypes.RECT()
+    _user32.GetWindowRect(_hwnd, ctypes.byref(rect))
+    _drag_start = (pt.x, pt.y, rect.left, rect.top)
+
+
+def mouse_drag_handler(sender, app_data):
+    """While dragging, move the window using Win32 SetWindowPos."""
+    if _drag_start is None or not _hwnd:
+        return
+    pt = ctypes.wintypes.POINT()
+    _user32.GetCursorPos(ctypes.byref(pt))
+    sx, sy, wx, wy = _drag_start
+    new_x = wx + (pt.x - sx)
+    new_y = wy + (pt.y - sy)
+    SWP_NOSIZE = 0x0001
+    SWP_NOZORDER = 0x0004
+    SWP_NOACTIVATE = 0x0010
+    _user32.SetWindowPos(
+        _hwnd, None, new_x, new_y, 0, 0,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+    )
+
+
+def mouse_release_handler(sender, app_data):
+    """Stop dragging on mouse release."""
+    global _drag_start
+    _drag_start = None
 
 
 # ---------------------------------------------------------------------------
@@ -714,10 +792,14 @@ def main():
     ):
         pass
 
-    # Mouse handler — only need mouse-down for native Win32 drag
+    # Mouse handlers for drag-to-move
     with dpg.handler_registry():
         dpg.add_mouse_down_handler(button=dpg.mvMouseButton_Left,
                                    callback=mouse_down_handler)
+        dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Left,
+                                   callback=mouse_drag_handler, threshold=1)
+        dpg.add_mouse_release_handler(button=dpg.mvMouseButton_Left,
+                                      callback=mouse_release_handler)
 
     # Main window
     with dpg.window(tag="primary", no_title_bar=True, no_resize=False,
@@ -797,13 +879,15 @@ def main():
         process_queue()
 
         # Retry HWND detection if it failed at startup
-        if sys.platform == "win32" and not _hwnd_ready and _hwnd_retry_count < 30:
+        if sys.platform == "win32" and not _hwnd_ready and _hwnd_retry_count < 60:
             _cache_hwnd()
             if _hwnd:
                 _add_resize_border()
                 if app.always_on_top:
                     _set_topmost(True)
                 _hwnd_ready = True
+                if _debug_mode:
+                    print(f"[debug] HWND={_hwnd} found on retry {_hwnd_retry_count}", flush=True)
             _hwnd_retry_count += 1
 
         now = time.time()
