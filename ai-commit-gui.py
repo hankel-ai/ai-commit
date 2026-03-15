@@ -46,6 +46,8 @@ _maybe_detach()
 
 import dearpygui.dearpygui as dpg
 
+import webbrowser
+
 from ai_commit_core import (
     STATUS_LABELS,
     OllamaError,
@@ -54,6 +56,8 @@ from ai_commit_core import (
     do_commit_and_push,
     generate_message,
     get_diff,
+    get_last_commit,
+    get_remote_url,
     get_status,
 )
 
@@ -162,6 +166,9 @@ class RepoState:
     commit_message: str = ""
     gen_status: GenStatus = GenStatus.IDLE
     error_message: str = ""
+    remote_url: str = ""
+    last_commit_msg: str = ""
+    last_commit_date: str = ""
     # dpg widget tags
     header_tag: int = 0
     files_group_tag: int = 0
@@ -429,7 +436,20 @@ def bg_poll_repos():
     results = {}
     for rp in repo_paths:
         entries = get_status(rp)
-        results[rp.name] = {"path": rp, "entries": entries}
+        last_msg, last_date = get_last_commit(rp)
+        # Cache remote URL: only fetch for new repos
+        existing = app.repos.get(rp.name)
+        if existing and existing.remote_url:
+            remote_url = existing.remote_url
+        else:
+            remote_url = get_remote_url(rp)
+        results[rp.name] = {
+            "path": rp,
+            "entries": entries,
+            "remote_url": remote_url,
+            "last_commit_msg": last_msg,
+            "last_commit_date": last_date,
+        }
     ui_queue.put(("poll_result", results))
 
 
@@ -532,6 +552,11 @@ def cb_generate(sender, app_data, user_data):
         dpg.set_value(rs.input_tag, "")
     update_repo_status(rs)
     executor.submit(bg_generate_message, repo_name)
+
+
+def cb_open_repo_url(sender, app_data, user_data):
+    if user_data:
+        webbrowser.open(user_data)
 
 
 def cb_accept(sender, app_data, user_data):
@@ -732,6 +757,22 @@ def build_repo_section(rs, parent):
         default_open=change_count > 0,
     )
 
+    # GitHub link + last commit info row
+    if rs.remote_url or rs.last_commit_msg:
+        with dpg.group(horizontal=True, parent=rs.header_tag):
+            if rs.remote_url:
+                btn = dpg.add_button(label="GitHub", callback=cb_open_repo_url, user_data=rs.remote_url)
+                dpg.bind_item_theme(btn, link_btn_theme)
+            if rs.last_commit_msg:
+                commit_label = rs.last_commit_msg
+                if len(commit_label) > 50:
+                    commit_label = commit_label[:47] + "..."
+                if rs.last_commit_date:
+                    commit_label = f"latest: {commit_label} — {rs.last_commit_date}"
+                else:
+                    commit_label = f"latest: {commit_label}"
+                dpg.add_text(commit_label, color=COL_DIM)
+
     rs.files_group_tag = dpg.add_group(parent=rs.header_tag)
     for code, filepath in rs.entries:
         lbl = STATUS_LABELS.get(code, code)
@@ -865,6 +906,9 @@ def rebuild_repos_ui(results):
             commit_message=msg,
             gen_status=gen,
             error_message=err,
+            remote_url=info.get("remote_url", ""),
+            last_commit_msg=info.get("last_commit_msg", ""),
+            last_commit_date=info.get("last_commit_date", ""),
         )
         new_repos[name] = rs
         build_repo_section(rs, "repos_container")
@@ -976,10 +1020,11 @@ def parse_args():
 
 
 green_btn_theme = None
+link_btn_theme = None
 
 
 def main():
-    global green_btn_theme
+    global green_btn_theme, link_btn_theme
 
     args = parse_args()
     app.model = args.model
@@ -1035,6 +1080,16 @@ def main():
     global_theme = create_theme()
     dpg.bind_theme(global_theme)
     green_btn_theme = create_button_theme((50, 130, 75))
+
+    # Link-styled button theme: transparent background, accent-colored text
+    with dpg.theme() as link_btn_theme:
+        with dpg.theme_component(dpg.mvButton):
+            dpg.add_theme_color(dpg.mvThemeCol_Button, (0, 0, 0, 0))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (100, 140, 230, 40))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (100, 140, 230, 80))
+            dpg.add_theme_color(dpg.mvThemeCol_Text, COL_ACCENT)
+            dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 2, 2)
+            dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 2)
 
     # Main window
     with dpg.window(tag="primary", no_title_bar=True, no_resize=False,

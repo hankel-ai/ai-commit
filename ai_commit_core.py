@@ -80,6 +80,42 @@ def get_status(cwd):
     return entries
 
 
+def get_remote_url(cwd):
+    """Return the HTTPS URL for the repo's origin remote, or empty string."""
+    rc, stdout, _ = run_git(["remote", "get-url", "origin"], cwd=cwd)
+    if rc != 0 or not stdout.strip():
+        return ""
+    url = stdout.strip()
+    # Convert SSH URLs to HTTPS
+    if url.startswith("git@"):
+        # git@github.com:user/repo.git -> https://github.com/user/repo
+        url = url.replace(":", "/", 1).replace("git@", "https://", 1)
+    # Strip trailing .git
+    if url.endswith(".git"):
+        url = url[:-4]
+    return url
+
+
+def get_last_commit(cwd):
+    """Return (subject, short_date) for HEAD, or ("", "")."""
+    rc, stdout, _ = run_git(["log", "-1", "--format=%s|%ci"], cwd=cwd)
+    if rc != 0 or not stdout.strip():
+        return "", ""
+    parts = stdout.strip().split("|", 1)
+    if len(parts) < 2:
+        return parts[0], ""
+    subject = parts[0]
+    # Parse ISO-ish date "2026-03-14 15:30:00 +0100" -> "Mar 14 15:30"
+    date_str = parts[1].strip()
+    try:
+        from datetime import datetime
+        dt = datetime.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
+        short_date = dt.strftime("%b %d %H:%M")
+    except (ValueError, IndexError):
+        short_date = date_str[:16]
+    return subject, short_date
+
+
 def get_diff(cwd):
     """Build a combined diff string: staged + unstaged changes and untracked file contents."""
     parts = []
