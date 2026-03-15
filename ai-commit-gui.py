@@ -198,6 +198,7 @@ def _save_settings():
             "always_on_top": app.always_on_top,
             "poll_interval": app.poll_interval,
             "model": app.model,
+            "watched_folder": str(app.watched_folder),
         }
         _SETTINGS_FILE.write_text(json.dumps(data))
     except Exception:
@@ -842,9 +843,9 @@ def main():
     global green_btn_theme
 
     args = parse_args()
-    app.watched_folder = Path(args.folder).resolve()
     app.model = args.model
     app.ollama_url = args.url
+    folder_from_cli = args.folder != "."
 
     dpg.create_context()
 
@@ -860,6 +861,16 @@ def main():
         app.poll_interval = saved.get("poll_interval", 30)
         if "model" in saved:
             app.model = saved["model"]
+        if not folder_from_cli and "watched_folder" in saved:
+            p = Path(saved["watched_folder"])
+            if p.is_dir():
+                app.watched_folder = p
+
+    # CLI folder argument takes priority over saved setting
+    if folder_from_cli:
+        app.watched_folder = Path(args.folder).resolve()
+    elif not app.watched_folder or app.watched_folder == Path("."):
+        app.watched_folder = Path(args.folder).resolve()
     if args.topmost:
         app.always_on_top = True
     if args.poll != 30:  # user explicitly passed --poll
