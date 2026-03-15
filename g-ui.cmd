@@ -1,1 +1,1 @@
-python "C:\Users\admin\OneDrive\Programs\ai-commiet\ai-commit-gui.py" %*
+python "C:\Users\admin\OneDrive\Programs\ai-commit\ai-commit-gui.py" %*
