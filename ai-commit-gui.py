@@ -4,6 +4,7 @@
 import argparse
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -11,6 +12,30 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Auto-detach from console on Windows so the GUI runs independently.
+# Pass --no-detach to keep it attached (useful for debugging).
+# ---------------------------------------------------------------------------
+
+def _maybe_detach():
+    if sys.platform != "win32":
+        return
+    if "--no-detach" in sys.argv:
+        sys.argv.remove("--no-detach")
+        return
+    if os.environ.get("_AI_COMMIT_GUI_CHILD"):
+        return
+    os.environ["_AI_COMMIT_GUI_CHILD"] = "1"
+    # Prefer pythonw.exe (no console window at all)
+    pythonw = sys.executable.replace("python.exe", "pythonw.exe")
+    if not os.path.isfile(pythonw):
+        pythonw = sys.executable
+    DETACHED_PROCESS = 0x00000008
+    subprocess.Popen([pythonw] + sys.argv, creationflags=DETACHED_PROCESS)
+    sys.exit(0)
+
+_maybe_detach()
 
 import dearpygui.dearpygui as dpg
 
@@ -54,7 +79,6 @@ class RepoState:
     gen_btn_tag: int = 0
     accept_btn_tag: int = 0
     regen_btn_tag: int = 0
-    count_tag: int = 0
 
 
 @dataclass
@@ -63,12 +87,10 @@ class AppState:
     repos: dict = field(default_factory=dict)  # name -> RepoState
     poll_interval: int = 30
     auto_generate: bool = False
+    always_on_top: bool = False
     model: str = "qwen3-coder:480b-cloud"
     ollama_url: str = "http://localhost:11434"
     last_poll: float = 0.0
-    dragging: bool = False
-    drag_offset_x: int = 0
-    drag_offset_y: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +103,6 @@ executor = ThreadPoolExecutor(max_workers=4)
 
 # Color palette
 COL_BG = (30, 30, 35)
-COL_HEADER_BG = (40, 40, 50)
 COL_ACCENT = (100, 140, 230)
 COL_GREEN = (80, 180, 100)
 COL_RED = (220, 80, 80)
@@ -132,6 +153,34 @@ def create_button_theme(color):
 
 
 # ---------------------------------------------------------------------------
+# Always-on-top toggle (Win32)
+# ---------------------------------------------------------------------------
+
+def set_always_on_top(on_top):
+    """Toggle the always-on-top flag for the viewport window using Win32 API."""
+    app.always_on_top = on_top
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        import ctypes.wintypes
+        hwnd = ctypes.windll.user32.GetActiveWindow()
+        if not hwnd:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+        HWND_TOPMOST = -1
+        HWND_NOTOPMOST = -2
+        SWP_NOMOVE = 0x0002
+        SWP_NOSIZE = 0x0001
+        SWP_NOACTIVATE = 0x0010
+        flag = HWND_TOPMOST if on_top else HWND_NOTOPMOST
+        ctypes.windll.user32.SetWindowPos(
+            hwnd, flag, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Background tasks
 # ---------------------------------------------------------------------------
 
@@ -178,43 +227,6 @@ def bg_commit_and_push(repo_name, message):
 
 
 # ---------------------------------------------------------------------------
-# Drag-to-move
-# ---------------------------------------------------------------------------
-
-def mouse_down_handler(sender, app_data):
-    mouse_x, mouse_y = dpg.get_mouse_pos(local=False)
-    # Header region: top 28px of viewport
-    vp_x = dpg.get_viewport_pos()[0]
-    vp_y = dpg.get_viewport_pos()[1]
-    if mouse_y < 28:
-        app.dragging = True
-        app.drag_offset_x = int(mouse_x) + vp_x
-        app.drag_offset_y = int(mouse_y) + vp_y
-
-
-def mouse_drag_handler(sender, app_data):
-    if not app.dragging:
-        return
-    # app_data = [button, dx, dy] for drag
-    mouse_x, mouse_y = dpg.get_mouse_pos(local=False)
-    new_x = int(mouse_x) + app.drag_offset_x - int(mouse_x)
-    new_y = int(mouse_y) + app.drag_offset_y - int(mouse_y)
-    # Use global mouse position
-    import ctypes
-    try:
-        pt = ctypes.wintypes.POINT()
-        ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-        dpg.set_viewport_pos([pt.x - (app.drag_offset_x - dpg.get_viewport_pos()[0]),
-                              pt.y - (app.drag_offset_y - dpg.get_viewport_pos()[1])])
-    except Exception:
-        pass
-
-
-def mouse_release_handler(sender, app_data):
-    app.dragging = False
-
-
-# ---------------------------------------------------------------------------
 # UI callbacks
 # ---------------------------------------------------------------------------
 
@@ -252,6 +264,10 @@ def cb_poll_changed(sender, app_data):
 
 def cb_auto_generate(sender, app_data):
     app.auto_generate = dpg.get_value(sender)
+
+
+def cb_always_on_top(sender, app_data):
+    set_always_on_top(dpg.get_value(sender))
 
 
 def cb_generate(sender, app_data, user_data):
@@ -294,40 +310,34 @@ def cb_regen(sender, app_data, user_data):
     executor.submit(bg_generate_message, repo_name)
 
 
-def cb_close(sender, app_data):
-    """Hide window to tray instead of quitting."""
-    try:
-        import pystray
-        # Move off-screen to hide
-        dpg.set_viewport_pos([-10000, -10000])
-    except ImportError:
-        dpg.stop_dearpygui()
-
-
-def cb_quit_real():
-    dpg.stop_dearpygui()
+def cb_hide_to_tray(sender, app_data):
+    """Move the window off-screen to simulate hide-to-tray."""
+    dpg.set_viewport_pos([-10000, -10000])
 
 
 # ---------------------------------------------------------------------------
-# Tray icon
+# System tray
 # ---------------------------------------------------------------------------
 
 tray_icon = None
+_has_tray = False
 
 
 def setup_tray():
-    global tray_icon
+    global tray_icon, _has_tray
     try:
         import pystray
         from PIL import Image, ImageDraw
     except ImportError:
-        return  # No tray if pystray/Pillow not installed
+        return
 
-    # Create a simple icon: blue circle on dark background
-    img = Image.new("RGBA", (64, 64), (30, 30, 35, 255))
+    # Simple icon: blue rounded rectangle on dark background
+    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.ellipse([12, 12, 52, 52], fill=(100, 140, 230, 255))
-    draw.text((22, 20), "AC", fill=(255, 255, 255, 255))
+    draw.rounded_rectangle([4, 4, 60, 60], radius=10, fill=(100, 140, 230, 255))
+    draw.rounded_rectangle([14, 18, 50, 26], radius=2, fill=(255, 255, 255, 200))
+    draw.rounded_rectangle([14, 30, 42, 38], radius=2, fill=(255, 255, 255, 200))
+    draw.rounded_rectangle([14, 42, 36, 50], radius=2, fill=(255, 255, 255, 200))
 
     def on_show(icon, item):
         ui_queue.put(("tray_show", None))
@@ -341,6 +351,7 @@ def setup_tray():
         pystray.MenuItem("Quit", on_quit),
     )
     tray_icon = pystray.Icon("ai_commit_monitor", img, "AI Commit Monitor", menu)
+    _has_tray = True
     t = threading.Thread(target=tray_icon.run, daemon=True)
     t.start()
 
@@ -526,7 +537,6 @@ def process_queue():
                 update_repo_status(rs)
 
         elif kind == "tray_show":
-            # Restore window to center of screen
             dpg.set_viewport_pos([100, 100])
 
         elif kind == "tray_quit":
@@ -547,6 +557,10 @@ def parse_args():
                         help="Ollama base URL")
     parser.add_argument("--poll", type=int, default=30,
                         help="Poll interval in seconds (default: 30)")
+    parser.add_argument("--topmost", action="store_true",
+                        help="Start with always-on-top enabled")
+    parser.add_argument("--no-detach", action="store_true",
+                        help="Keep attached to the launching terminal (for debugging)")
     return parser.parse_args()
 
 
@@ -561,18 +575,19 @@ def main():
     app.model = args.model
     app.ollama_url = args.url
     app.poll_interval = args.poll
+    app.always_on_top = args.topmost
 
     dpg.create_context()
 
-    # Viewport setup: compact, no OS title bar
+    # Viewport: native decorated window (movable + resizable)
     dpg.create_viewport(
         title="AI Commit Monitor",
         width=520,
         height=600,
         min_width=400,
         min_height=300,
-        decorated=False,
-        always_on_top=True,
+        decorated=True,
+        always_on_top=app.always_on_top,
     )
 
     # Theme
@@ -591,27 +606,9 @@ def main():
     ):
         pass
 
-    # Mouse handlers for drag-to-move
-    with dpg.handler_registry():
-        dpg.add_mouse_down_handler(button=dpg.mvMouseButton_Left, callback=mouse_down_handler)
-        dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Left, threshold=1, callback=mouse_drag_handler)
-        dpg.add_mouse_release_handler(button=dpg.mvMouseButton_Left, callback=mouse_release_handler)
-
     # Main window
     with dpg.window(tag="primary", no_title_bar=True, no_resize=False,
                     no_move=True, no_close=True):
-
-        # Custom title bar
-        with dpg.group(horizontal=True):
-            dpg.add_text("AI Commit Monitor", color=COL_ACCENT)
-            dpg.add_spacer(width=-1)
-
-        with dpg.group(horizontal=True):
-            dpg.add_spacer(width=-1)
-            dpg.add_button(label=" - ", callback=lambda: dpg.minimize_viewport(), width=30)
-            dpg.add_button(label=" X ", callback=cb_close, width=30)
-
-        dpg.add_separator()
 
         # Settings bar
         with dpg.group(horizontal=True):
@@ -627,9 +624,15 @@ def main():
                               min_value=5, min_clamped=True, max_value=600, max_clamped=True,
                               callback=cb_poll_changed, step=0)
             dpg.add_text("s", color=COL_DIM)
-            dpg.add_spacer(width=10)
+
+        with dpg.group(horizontal=True):
             dpg.add_checkbox(label="Auto-generate", default_value=app.auto_generate,
                              callback=cb_auto_generate)
+            dpg.add_spacer(width=10)
+            dpg.add_checkbox(label="Always on top", default_value=app.always_on_top,
+                             callback=cb_always_on_top)
+            dpg.add_spacer(width=10)
+            dpg.add_button(label="Hide to tray", callback=cb_hide_to_tray, tag="hide_btn")
 
         dpg.add_separator()
 
@@ -643,8 +646,10 @@ def main():
     dpg.setup_dearpygui()
     dpg.show_viewport()
 
-    # System tray
+    # System tray (after viewport is visible)
     setup_tray()
+    if not _has_tray:
+        dpg.configure_item("hide_btn", show=False)
 
     # Initial poll
     trigger_poll()
