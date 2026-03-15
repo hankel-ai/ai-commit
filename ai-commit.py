@@ -123,6 +123,14 @@ def generate_message_ollama(diff, model, base_url):
         with urllib.request.urlopen(req, timeout=120) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         return body["message"]["content"].strip()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            print(f"\nError: Model '{model}' not found on Ollama.")
+            print("Available models can be listed with: ollama list")
+            print(f"Pull it with: ollama pull {model}")
+        else:
+            print(f"\nError: Ollama returned HTTP {exc.code}: {exc.reason}")
+        sys.exit(1)
     except urllib.error.URLError as exc:
         print(f"\nError: Could not reach Ollama at {base_url}")
         print("Is Ollama running? Start it with: ollama serve")
@@ -217,12 +225,16 @@ def parse_args():
         help="Path to the git repository (default: current directory)",
     )
     parser.add_argument(
-        "--model", default=os.environ.get("AI_COMMIT_MODEL", "llama3"),
-        help="Ollama model name (default: llama3, env: AI_COMMIT_MODEL)",
+        "--model", default=os.environ.get("AI_COMMIT_MODEL", "llama3.1:8b"),
+        help="Ollama model name (default: llama3.1:8b, env: AI_COMMIT_MODEL)",
     )
     parser.add_argument(
         "--url", default=os.environ.get("AI_COMMIT_URL", "http://localhost:11434"),
         help="Ollama base URL (default: http://localhost:11434, env: AI_COMMIT_URL)",
+    )
+    parser.add_argument(
+        "--test", action="store_true",
+        help="Test mode: check Ollama connectivity, generate message, but don't commit",
     )
     return parser.parse_args()
 
@@ -231,6 +243,7 @@ def main():
     args = parse_args()
     target = Path(args.folder).resolve()
     config = {"model": args.model, "url": args.url}
+    test_mode = args.test
 
     # Validate target
     if not target.is_dir():
@@ -256,6 +269,14 @@ def main():
 
     print(f"Generating commit message with {config['model']}...")
     message = generate_message(diff, config)
+
+    if test_mode:
+        print("\n" + "─" * 60)
+        print("TEST MODE — generated commit message:\n")
+        print(message)
+        print("\n" + "─" * 60)
+        print("Ollama is reachable and responding. No changes were committed.")
+        sys.exit(0)
 
     # Interaction loop
     while True:
