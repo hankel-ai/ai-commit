@@ -100,6 +100,14 @@ if sys.platform == "win32":
     _user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
     _user32.IsWindowVisible.restype = ctypes.c_bool
 
+    # GetWindowLongW
+    _user32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    _user32.GetWindowLongW.restype = ctypes.c_long
+
+    # SetWindowLongW
+    _user32.SetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
+    _user32.SetWindowLongW.restype = ctypes.c_long
+
     # EnumWindows
     WNDENUMPROC = ctypes.WINFUNCTYPE(
         ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p
@@ -282,6 +290,18 @@ def _set_topmost(on_top):
     _user32.SetWindowPos(
         _hwnd, flag, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
     )
+
+
+def _hide_taskbar_icon():
+    """Remove the window from the taskbar using WS_EX_TOOLWINDOW."""
+    if not _hwnd:
+        return
+    GWL_EXSTYLE = -20
+    WS_EX_TOOLWINDOW = 0x00000080
+    WS_EX_APPWINDOW = 0x00040000
+    style = _user32.GetWindowLongW(_hwnd, GWL_EXSTYLE)
+    style = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+    _user32.SetWindowLongW(_hwnd, GWL_EXSTYLE, style)
 
 
 def _hide_window():
@@ -548,11 +568,6 @@ def cb_model_changed(sender, app_data):
 def cb_model_reset(sender, app_data):
     app.model = _DEFAULT_MODEL
     dpg.set_value("model_input", _DEFAULT_MODEL)
-
-
-def cb_hide_to_tray(sender, app_data):
-    """Hide to system tray."""
-    _hide_window()
 
 
 # ---------------------------------------------------------------------------
@@ -982,8 +997,6 @@ def main():
         with dpg.group(horizontal=True):
             dpg.add_button(label="Browse", callback=cb_browse)
             dpg.add_button(label="Refresh", callback=cb_refresh)
-            dpg.add_button(label="Hide to Tray", callback=cb_hide_to_tray,
-                           tag="tray_btn", show=False)
             dpg.add_spacer(width=10)
             dpg.add_text("Poll:", color=COL_DIM)
             dpg.add_input_int(default_value=app.poll_interval, width=50,
@@ -1042,8 +1055,10 @@ def main():
 
     # System tray
     setup_tray()
-    if _has_tray:
-        dpg.configure_item("tray_btn", show=True)
+    # Auto-minimize to tray and hide taskbar icon
+    if _has_tray and _hwnd_ready:
+        _hide_taskbar_icon()
+        _hide_window()
 
     # Initial poll
     trigger_poll()
@@ -1060,6 +1075,10 @@ def main():
                 if app.always_on_top:
                     _set_topmost(True)
                 _hwnd_ready = True
+                # Auto-minimize to tray once HWND is available
+                if _has_tray:
+                    _hide_taskbar_icon()
+                    _hide_window()
             _hwnd_retry_count += 1
 
         now = time.time()
