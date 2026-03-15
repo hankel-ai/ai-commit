@@ -55,6 +55,13 @@ def is_git_repo(path):
     return rc == 0
 
 
+def _unquote_path(p):
+    """Strip the quotes git adds around paths containing spaces/specials."""
+    if len(p) >= 2 and p.startswith('"') and p.endswith('"'):
+        return p[1:-1].encode("utf-8").decode("unicode_escape")
+    return p
+
+
 def get_status(cwd):
     """Return list of (status_code, filepath) tuples from git status --porcelain."""
     rc, stdout, _ = run_git(["status", "--porcelain"], cwd=cwd)
@@ -65,7 +72,7 @@ def get_status(cwd):
         if len(line) < 4:
             continue
         code = line[:2].strip()
-        filepath = line[3:]
+        filepath = _unquote_path(line[3:])
         entries.append((code, filepath))
     return entries
 
@@ -86,7 +93,7 @@ def get_diff(cwd):
     _, status_out, _ = run_git(["status", "--porcelain"], cwd=cwd)
     for line in status_out.splitlines():
         if line.startswith("??"):
-            filepath = line[3:]
+            filepath = _unquote_path(line[3:])
             full = Path(cwd) / filepath
             if full.is_file():
                 try:
