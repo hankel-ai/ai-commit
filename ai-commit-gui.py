@@ -397,22 +397,33 @@ def bg_commit_and_push(repo_name, message):
 # UI callbacks
 # ---------------------------------------------------------------------------
 
-def cb_browse(sender, app_data):
-    dpg.show_item("folder_dialog")
+def _native_folder_dialog(initial_dir):
+    """Show native folder picker in a subprocess, return selected path or ''."""
+    script = (
+        "import tkinter as tk; from tkinter import filedialog; "
+        "root = tk.Tk(); root.withdraw(); root.attributes('-topmost', True); "
+        f"p = filedialog.askdirectory(parent=root, initialdir={str(initial_dir)!r}); "
+        "root.destroy(); print(p)"
+    )
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, **kwargs,
+    )
+    return result.stdout.strip()
 
 
-def cb_folder_selected(sender, app_data):
-    selections = app_data.get("selections", {})
-    if selections:
-        chosen = list(selections.values())[0]
-    else:
-        chosen = app_data.get("file_path_name", "")
+def bg_browse():
+    """Run native folder picker in background, post result to UI queue."""
+    chosen = _native_folder_dialog(app.watched_folder)
     if chosen:
-        folder = Path(chosen)
-        if folder.is_dir():
-            app.watched_folder = folder
-            dpg.set_value("folder_label", str(folder))
-            trigger_poll()
+        ui_queue.put(("folder_selected", chosen))
+
+
+def cb_browse(sender, app_data):
+    executor.submit(bg_browse)
 
 
 def cb_refresh(sender, app_data):
@@ -862,6 +873,14 @@ def process_queue():
                 rs.error_message = detail
                 update_repo_status(rs)
 
+        elif kind == "folder_selected":
+            chosen = msg[1]
+            folder = Path(chosen)
+            if folder.is_dir():
+                app.watched_folder = folder
+                dpg.set_value("folder_label", str(folder))
+                trigger_poll()
+
         elif kind == "tray_show":
             _show_window()
 
@@ -950,17 +969,6 @@ def main():
     global_theme = create_theme()
     dpg.bind_theme(global_theme)
     green_btn_theme = create_button_theme((50, 130, 75))
-
-    # File dialog for folder selection
-    with dpg.file_dialog(
-        directory_selector=True,
-        show=False,
-        callback=cb_folder_selected,
-        tag="folder_dialog",
-        width=500,
-        height=400,
-    ):
-        pass
 
     # Main window
     with dpg.window(tag="primary", no_title_bar=True, no_resize=False,
