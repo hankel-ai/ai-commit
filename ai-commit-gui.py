@@ -474,6 +474,60 @@ def cb_accept(sender, app_data, user_data):
 
 
 
+# ---------------------------------------------------------------------------
+# Windows startup registry helpers
+# ---------------------------------------------------------------------------
+
+_STARTUP_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_STARTUP_REG_NAME = "AICommitMonitor"
+
+
+def _get_startup_command():
+    """Return the command string to launch this app at startup."""
+    pythonw = sys.executable.replace("python.exe", "pythonw.exe")
+    if not os.path.isfile(pythonw):
+        pythonw = sys.executable
+    script = str(Path(__file__).resolve())
+    return f'"{pythonw}" "{script}"'
+
+
+def _is_startup_enabled():
+    """Check if the app is registered to run at Windows startup."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STARTUP_REG_KEY, 0, winreg.KEY_READ)
+        winreg.QueryValueEx(key, _STARTUP_REG_NAME)
+        winreg.CloseKey(key)
+        return True
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _set_startup_enabled(enabled):
+    """Add or remove the app from Windows startup registry."""
+    if sys.platform != "win32":
+        return
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _STARTUP_REG_KEY, 0, winreg.KEY_SET_VALUE)
+        if enabled:
+            winreg.SetValueEx(key, _STARTUP_REG_NAME, 0, winreg.REG_SZ, _get_startup_command())
+        else:
+            try:
+                winreg.DeleteValue(key, _STARTUP_REG_NAME)
+            except FileNotFoundError:
+                pass
+        winreg.CloseKey(key)
+    except OSError:
+        pass
+
+
+def cb_start_with_windows(sender, app_data):
+    _set_startup_enabled(dpg.get_value(sender))
+
+
 def cb_model_changed(sender, app_data):
     val = dpg.get_value(sender).strip()
     if val:
@@ -933,6 +987,10 @@ def main():
             dpg.add_spacer(width=10)
             dpg.add_checkbox(label="Always on top", default_value=app.always_on_top,
                              callback=cb_always_on_top)
+            dpg.add_spacer(width=10)
+            dpg.add_checkbox(label="Run at startup", default_value=_is_startup_enabled(),
+                             callback=cb_start_with_windows,
+                             tag="startup_chk", show=(sys.platform == "win32"))
             dpg.add_spacer(width=10)
             dpg.add_button(label="Hide to Tray", callback=cb_hide_to_tray,
                            tag="tray_btn", show=False)
