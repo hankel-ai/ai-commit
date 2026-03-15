@@ -1,0 +1,1 @@
+python "C:\Users\admin\OneDrive\Programs\ai-commiet\ai-commit-gui.py" %*
