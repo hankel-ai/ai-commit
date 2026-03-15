@@ -982,6 +982,8 @@ def main():
         with dpg.group(horizontal=True):
             dpg.add_button(label="Browse", callback=cb_browse)
             dpg.add_button(label="Refresh", callback=cb_refresh)
+            dpg.add_button(label="Hide to Tray", callback=cb_hide_to_tray,
+                           tag="tray_btn", show=False)
             dpg.add_spacer(width=10)
             dpg.add_text("Poll:", color=COL_DIM)
             dpg.add_input_int(default_value=app.poll_interval, width=50,
@@ -999,9 +1001,6 @@ def main():
             dpg.add_checkbox(label="Run at startup", default_value=_is_startup_enabled(),
                              callback=cb_start_with_windows,
                              tag="startup_chk", show=(sys.platform == "win32"))
-            dpg.add_spacer(width=10)
-            dpg.add_button(label="Hide to Tray", callback=cb_hide_to_tray,
-                           tag="tray_btn", show=False)
 
         dpg.add_separator()
 
