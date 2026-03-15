@@ -225,8 +225,8 @@ def parse_args():
         help="Path to the git repository (default: current directory)",
     )
     parser.add_argument(
-        "--model", default=os.environ.get("AI_COMMIT_MODEL", "llama3.1:8b"),
-        help="Ollama model name (default: llama3.1:8b, env: AI_COMMIT_MODEL)",
+        "--model", default=os.environ.get("AI_COMMIT_MODEL", "qwen3-coder:480b-cloud"),
+        help="Ollama model name (default: qwen3-coder:480b-cloud, env: AI_COMMIT_MODEL)",
     )
     parser.add_argument(
         "--url", default=os.environ.get("AI_COMMIT_URL", "http://localhost:11434"),
