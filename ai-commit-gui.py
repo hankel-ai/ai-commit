@@ -659,8 +659,8 @@ def _height_for_text(text):
     if not text:
         return 60
     num_lines = text.count("\n") + 1
-    # ~18px per line + small top/bottom padding
-    return max(60, min(300, num_lines * 18 + 14))
+    # ~15px per line + frame padding
+    return max(60, min(400, num_lines * 15 + 8))
 
 
 def rebuild_repos_ui(results):
