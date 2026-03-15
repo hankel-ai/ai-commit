@@ -454,11 +454,16 @@ def cb_accept(sender, app_data, user_data):
     rs = app.repos.get(repo_name)
     if not rs:
         return
-    message = dpg.get_value(rs.input_tag).strip()
-    if not message:
+    widget_text = dpg.get_value(rs.input_tag).strip()
+    if not widget_text:
         dpg.set_value(rs.status_tag, "No commit message.")
         dpg.configure_item(rs.status_tag, color=COL_RED)
         return
+    # Use original unwrapped message if user hasn't edited the display text
+    if rs.commit_message and widget_text == _wrap_for_display(rs.commit_message).strip():
+        message = rs.commit_message
+    else:
+        message = widget_text
     rs.gen_status = GenStatus.GENERATING
     dpg.set_value(rs.status_tag, "Committing & pushing...")
     dpg.configure_item(rs.status_tag, color=COL_YELLOW)
@@ -596,12 +601,10 @@ def build_repo_section(rs, parent):
     # Commit message input
     if rs.entries:
         dpg.add_spacer(height=2, parent=rs.header_tag)
-        wrapped = _wrap_message(rs.commit_message) if rs.commit_message else ""
-        if wrapped and wrapped != rs.commit_message:
-            rs.commit_message = wrapped
-        input_h = _height_for_text(wrapped) if wrapped else 60
+        display_text = _wrap_for_display(rs.commit_message) if rs.commit_message else ""
+        input_h = _height_for_text(display_text) if display_text else 60
         rs.input_tag = dpg.add_input_text(
-            default_value=rs.commit_message,
+            default_value=display_text,
             hint="Commit message...",
             multiline=True,
             height=input_h,
@@ -626,20 +629,21 @@ def build_repo_section(rs, parent):
         rs.input_tag = 0
 
 
+
 def _get_wrap_width():
     """Estimate how many characters fit in one line of the input widget."""
     try:
         vp_width = dpg.get_viewport_width()
     except Exception:
         vp_width = 520
-    # Subtract window padding (8*2), frame padding (6*2), scrollbar (12), borders
-    text_px = vp_width - 48
-    char_px = 7.5  # approx monospace char width in DPG default font
+    # Account for window padding, frame padding, scrollbar, collapsing header indent
+    text_px = vp_width - 62
+    char_px = 6.8  # DPG default proportional font average
     return max(40, int(text_px / char_px))
 
 
-def _wrap_message(text):
-    """Wrap a commit message to fit the current viewport width."""
+def _wrap_for_display(text):
+    """Wrap text for display only. Does NOT modify the original commit message."""
     if not text:
         return text
     width = _get_wrap_width()
@@ -767,10 +771,9 @@ def process_queue():
                 rs.commit_message = message
                 rs.error_message = ""
                 if rs.input_tag and dpg.does_item_exist(rs.input_tag):
-                    wrapped = _wrap_message(message)
-                    rs.commit_message = wrapped
-                    dpg.set_value(rs.input_tag, wrapped)
-                    dpg.configure_item(rs.input_tag, height=_height_for_text(wrapped))
+                    display = _wrap_for_display(message)
+                    dpg.set_value(rs.input_tag, display)
+                    dpg.configure_item(rs.input_tag, height=_height_for_text(display))
             update_repo_status(rs)
 
         elif kind == "commit_result":
