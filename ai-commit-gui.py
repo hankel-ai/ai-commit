@@ -100,6 +100,10 @@ if sys.platform == "win32":
     _user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
     _user32.IsWindowVisible.restype = ctypes.c_bool
 
+    # IsIconic (True when window is minimized)
+    _user32.IsIconic.argtypes = [ctypes.c_void_p]
+    _user32.IsIconic.restype = ctypes.c_bool
+
     # GetWindowLongW
     _user32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
     _user32.GetWindowLongW.restype = ctypes.c_long
@@ -293,15 +297,26 @@ def _set_topmost(on_top):
 
 
 def _hide_taskbar_icon():
-    """Remove the window from the taskbar using WS_EX_TOOLWINDOW."""
+    """Remove the window from the taskbar using WS_EX_TOOLWINDOW.
+
+    Also restores minimize/maximize buttons that WS_EX_TOOLWINDOW removes.
+    """
     if not _hwnd:
         return
     GWL_EXSTYLE = -20
+    GWL_STYLE = -16
     WS_EX_TOOLWINDOW = 0x00000080
     WS_EX_APPWINDOW = 0x00040000
-    style = _user32.GetWindowLongW(_hwnd, GWL_EXSTYLE)
-    style = (style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
-    _user32.SetWindowLongW(_hwnd, GWL_EXSTYLE, style)
+    WS_MINIMIZEBOX = 0x00020000
+    WS_MAXIMIZEBOX = 0x00010000
+    # Hide from taskbar
+    ex_style = _user32.GetWindowLongW(_hwnd, GWL_EXSTYLE)
+    ex_style = (ex_style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+    _user32.SetWindowLongW(_hwnd, GWL_EXSTYLE, ex_style)
+    # Restore minimize/maximize buttons
+    style = _user32.GetWindowLongW(_hwnd, GWL_STYLE)
+    style = style | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
+    _user32.SetWindowLongW(_hwnd, GWL_STYLE, style)
 
 
 def _hide_window():
@@ -1055,10 +1070,9 @@ def main():
 
     # System tray
     setup_tray()
-    # Auto-minimize to tray and hide taskbar icon
-    if _has_tray and _hwnd_ready:
+    # Hide taskbar icon (app lives in the tray)
+    if _hwnd_ready:
         _hide_taskbar_icon()
-        _hide_window()
 
     # Initial poll
     trigger_poll()
@@ -1074,12 +1088,14 @@ def main():
             if _hwnd:
                 if app.always_on_top:
                     _set_topmost(True)
+                _hide_taskbar_icon()
                 _hwnd_ready = True
-                # Auto-minimize to tray once HWND is available
-                if _has_tray:
-                    _hide_taskbar_icon()
-                    _hide_window()
             _hwnd_retry_count += 1
+
+        # Intercept minimize → hide to tray instead
+        if _hwnd and _has_tray and not _window_hidden and _user32.IsIconic(_hwnd):
+            _user32.ShowWindow(_hwnd, 9)  # SW_RESTORE (undo iconic state)
+            _hide_window()
 
         now = time.time()
         if now - app.last_poll >= app.poll_interval:
