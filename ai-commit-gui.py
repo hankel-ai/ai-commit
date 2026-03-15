@@ -97,10 +97,6 @@ class AppState:
     model: str = "qwen3-coder:480b-cloud"
     ollama_url: str = "http://localhost:11434"
     last_poll: float = 0.0
-    # Drag state
-    dragging: bool = False
-    drag_offset_x: int = 0
-    drag_offset_y: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -121,8 +117,8 @@ COL_YELLOW = (220, 180, 60)
 COL_DIM = (120, 120, 130)
 COL_WHITE = (220, 220, 225)
 
-# Title bar height for drag region
-TITLEBAR_HEIGHT = 28
+# Height of the custom title bar drag region (pixels from top of window)
+TITLEBAR_HEIGHT = 40
 
 
 # ---------------------------------------------------------------------------
@@ -130,11 +126,22 @@ TITLEBAR_HEIGHT = 28
 # ---------------------------------------------------------------------------
 
 def _cache_hwnd():
-    """Find and cache the viewport HWND by window title."""
+    """Find and cache the viewport HWND."""
     global _hwnd
     if sys.platform != "win32":
         return
-    _hwnd = ctypes.windll.user32.FindWindowW(None, "AI Commit Monitor")
+    # Method 1: FindWindowW by title
+    hwnd = ctypes.windll.user32.FindWindowW(None, "AI Commit Monitor")
+    if hwnd:
+        _hwnd = hwnd
+        return
+    # Method 2: foreground window, verified by process ID
+    hwnd = ctypes.windll.user32.GetForegroundWindow()
+    if hwnd:
+        proc_id = ctypes.wintypes.DWORD()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(proc_id))
+        if proc_id.value == os.getpid():
+            _hwnd = hwnd
 
 
 def _add_resize_border():
@@ -175,26 +182,32 @@ def _set_topmost(on_top):
 def _hide_window():
     """Hide the viewport entirely (removes from taskbar too)."""
     if _hwnd:
-        SW_HIDE = 0
-        ctypes.windll.user32.ShowWindow(_hwnd, SW_HIDE)
+        ctypes.windll.user32.ShowWindow(_hwnd, 0)  # SW_HIDE
 
 
 def _show_window():
     """Show the viewport and bring it to front."""
     if _hwnd:
-        SW_SHOW = 5
-        ctypes.windll.user32.ShowWindow(_hwnd, SW_SHOW)
+        ctypes.windll.user32.ShowWindow(_hwnd, 5)  # SW_SHOW
         ctypes.windll.user32.SetForegroundWindow(_hwnd)
-        # Re-apply topmost if it was on
         if app.always_on_top:
             _set_topmost(True)
 
 
-def _get_cursor_screen_pos():
-    """Get absolute screen cursor position (Windows)."""
-    pt = ctypes.wintypes.POINT()
-    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-    return pt.x, pt.y
+def _begin_drag():
+    """Initiate a native Win32 title-bar drag.
+
+    ReleaseCapture() releases DPG/GLFW's mouse capture, then
+    SendMessageW(WM_NCLBUTTONDOWN, HTCAPTION) tells Windows the user
+    grabbed the caption bar.  Windows runs its own modal drag loop —
+    smooth, snaps to screen edges, identical to a normal window.
+    """
+    if not _hwnd:
+        return
+    ctypes.windll.user32.ReleaseCapture()
+    WM_NCLBUTTONDOWN = 0x00A1
+    HTCAPTION = 2
+    ctypes.windll.user32.SendMessageW(_hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -285,31 +298,23 @@ def bg_commit_and_push(repo_name, message):
 
 
 # ---------------------------------------------------------------------------
-# Drag-to-move (frameless window)
+# Drag-to-move handler
 # ---------------------------------------------------------------------------
 
 def mouse_down_handler(sender, app_data):
-    if sys.platform != "win32":
+    """On left-click in the title bar region, start a native Win32 drag."""
+    if sys.platform != "win32" or not _hwnd:
         return
     mouse_pos = dpg.get_mouse_pos(local=False)
-    # Only start drag if clicking in the title bar region
     if mouse_pos[1] < TITLEBAR_HEIGHT:
-        app.dragging = True
-        sx, sy = _get_cursor_screen_pos()
-        vx, vy = dpg.get_viewport_pos()
-        app.drag_offset_x = sx - vx
-        app.drag_offset_y = sy - vy
-
-
-def mouse_drag_handler(sender, app_data):
-    if not app.dragging:
-        return
-    sx, sy = _get_cursor_screen_pos()
-    dpg.set_viewport_pos([sx - app.drag_offset_x, sy - app.drag_offset_y])
-
-
-def mouse_release_handler(sender, app_data):
-    app.dragging = False
+        # Don't start drag if clicking on title bar buttons
+        try:
+            if (dpg.is_item_hovered("minimize_btn") or
+                    dpg.is_item_hovered("close_btn")):
+                return
+        except Exception:
+            pass
+        _begin_drag()
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +430,7 @@ def setup_tray():
     except ImportError:
         return
 
-    # Simple icon: blue rounded rect with white lines (looks like a commit list)
+    # Simple icon: blue rounded rect with white lines
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle([4, 4, 60, 60], radius=10, fill=(100, 140, 230, 255))
@@ -698,25 +703,26 @@ def main():
     ):
         pass
 
-    # Mouse handlers for drag-to-move
+    # Mouse handler — only need mouse-down for native Win32 drag
     with dpg.handler_registry():
-        dpg.add_mouse_down_handler(button=dpg.mvMouseButton_Left, callback=mouse_down_handler)
-        dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Left, threshold=1, callback=mouse_drag_handler)
-        dpg.add_mouse_release_handler(button=dpg.mvMouseButton_Left, callback=mouse_release_handler)
+        dpg.add_mouse_down_handler(button=dpg.mvMouseButton_Left,
+                                   callback=mouse_down_handler)
 
     # Main window
     with dpg.window(tag="primary", no_title_bar=True, no_resize=False,
                     no_move=True, no_close=True):
 
-        # Custom title bar (drag region = top TITLEBAR_HEIGHT pixels)
+        # Custom title bar (drag anywhere in this region to move)
         with dpg.group(horizontal=True):
             dpg.add_text("AI Commit Monitor", color=COL_ACCENT)
             dpg.add_spacer(width=-1)
 
         with dpg.group(horizontal=True):
             dpg.add_spacer(width=-1)
-            dpg.add_button(label=" - ", callback=cb_minimize, width=30)
-            dpg.add_button(label=" X ", callback=cb_close, width=30)
+            dpg.add_button(label=" - ", callback=cb_minimize, width=30,
+                           tag="minimize_btn")
+            dpg.add_button(label=" X ", callback=cb_close, width=30,
+                           tag="close_btn")
 
         dpg.add_separator()
 
@@ -754,10 +760,10 @@ def main():
     dpg.setup_dearpygui()
     dpg.show_viewport()
 
-    # Now that the viewport exists, cache HWND and apply Win32 tweaks
+    # Let the window fully materialise before touching Win32 APIs
     if sys.platform == "win32":
-        # Small delay so the window is fully created
-        dpg.render_dearpygui_frame()
+        for _ in range(5):
+            dpg.render_dearpygui_frame()
         _cache_hwnd()
         _add_resize_border()
         if app.always_on_top:
