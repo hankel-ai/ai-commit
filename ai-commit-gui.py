@@ -746,12 +746,21 @@ def update_repo_status(rs):
             dpg.configure_item(rs.status_tag, color=COL_DIM)
 
 
-def build_repo_section(rs, parent):
+def _repo_base_label(rs):
+    """Return the base header label (without the date portion)."""
+    change_count = len(rs.entries)
+    if change_count:
+        return f"{rs.name}/ ({change_count} change{'s' if change_count != 1 else ''})"
+    return f"{rs.name}/ (clean)"
+
+
+def build_repo_section(rs, parent, label_width=0):
     """Build the UI section for a single repo inside *parent*."""
     change_count = len(rs.entries)
-    label = f"{rs.name}/ ({change_count} change{'s' if change_count != 1 else ''})" if change_count else f"{rs.name}/ (clean)"
+    label = _repo_base_label(rs)
     if rs.last_commit_date:
-        label += f"  [{rs.last_commit_date}]"
+        pad = max(0, label_width - len(label))
+        label += " " * pad + f"  [{rs.last_commit_date}]"
 
     rs.header_tag = dpg.add_collapsing_header(
         label=label,
@@ -913,7 +922,12 @@ def rebuild_repos_ui(results):
             last_commit_date=info.get("last_commit_date", ""),
         )
         new_repos[name] = rs
-        build_repo_section(rs, "repos_container")
+
+    # Compute max base-label width so dates right-align
+    label_width = max((len(_repo_base_label(rs)) for rs in new_repos.values()), default=0)
+
+    for rs in new_repos.values():
+        build_repo_section(rs, "repos_container", label_width=label_width)
 
     app.repos = new_repos
 
