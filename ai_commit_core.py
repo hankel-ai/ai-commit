@@ -37,11 +37,15 @@ class OllamaError(Exception):
 
 def run_git(args, cwd):
     """Run a git command and return (returncode, stdout, stderr)."""
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     result = subprocess.run(
         ["git"] + args,
         cwd=cwd,
         capture_output=True,
         text=True,
+        **kwargs,
     )
     return result.returncode, result.stdout, result.stderr
 

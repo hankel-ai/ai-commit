@@ -27,12 +27,13 @@ def _maybe_detach():
     if os.environ.get("_AI_COMMIT_GUI_CHILD"):
         return
     os.environ["_AI_COMMIT_GUI_CHILD"] = "1"
-    # Prefer pythonw.exe (no console window at all)
     pythonw = sys.executable.replace("python.exe", "pythonw.exe")
     if not os.path.isfile(pythonw):
         pythonw = sys.executable
     DETACHED_PROCESS = 0x00000008
-    subprocess.Popen([pythonw] + sys.argv, creationflags=DETACHED_PROCESS)
+    CREATE_NO_WINDOW = 0x08000000
+    subprocess.Popen([pythonw] + sys.argv,
+                     creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW)
     sys.exit(0)
 
 _maybe_detach()
@@ -49,6 +50,11 @@ from ai_commit_core import (
     get_diff,
     get_status,
 )
+
+# Win32 API (Windows only)
+if sys.platform == "win32":
+    import ctypes
+    import ctypes.wintypes
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +97,10 @@ class AppState:
     model: str = "qwen3-coder:480b-cloud"
     ollama_url: str = "http://localhost:11434"
     last_poll: float = 0.0
+    # Drag state
+    dragging: bool = False
+    drag_offset_x: int = 0
+    drag_offset_y: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +110,7 @@ class AppState:
 app = AppState()
 ui_queue = queue.Queue()
 executor = ThreadPoolExecutor(max_workers=4)
+_hwnd = None  # Cached viewport HWND (Windows)
 
 # Color palette
 COL_BG = (30, 30, 35)
@@ -109,6 +120,81 @@ COL_RED = (220, 80, 80)
 COL_YELLOW = (220, 180, 60)
 COL_DIM = (120, 120, 130)
 COL_WHITE = (220, 220, 225)
+
+# Title bar height for drag region
+TITLEBAR_HEIGHT = 28
+
+
+# ---------------------------------------------------------------------------
+# Win32 helpers
+# ---------------------------------------------------------------------------
+
+def _cache_hwnd():
+    """Find and cache the viewport HWND by window title."""
+    global _hwnd
+    if sys.platform != "win32":
+        return
+    _hwnd = ctypes.windll.user32.FindWindowW(None, "AI Commit Monitor")
+
+
+def _add_resize_border():
+    """Add WS_THICKFRAME so the frameless window gets resize handles on edges."""
+    if not _hwnd:
+        return
+    GWL_STYLE = -16
+    WS_THICKFRAME = 0x00040000
+    style = ctypes.windll.user32.GetWindowLongW(_hwnd, GWL_STYLE)
+    style |= WS_THICKFRAME
+    ctypes.windll.user32.SetWindowLongW(_hwnd, GWL_STYLE, style)
+    # Force recalculation of non-client area
+    SWP_FRAMECHANGED = 0x0020
+    SWP_NOMOVE = 0x0002
+    SWP_NOSIZE = 0x0001
+    SWP_NOZORDER = 0x0004
+    ctypes.windll.user32.SetWindowPos(
+        _hwnd, 0, 0, 0, 0, 0,
+        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
+    )
+
+
+def _set_topmost(on_top):
+    """Set or clear the TOPMOST flag via Win32."""
+    if not _hwnd:
+        return
+    HWND_TOPMOST = -1
+    HWND_NOTOPMOST = -2
+    SWP_NOMOVE = 0x0002
+    SWP_NOSIZE = 0x0001
+    SWP_NOACTIVATE = 0x0010
+    flag = HWND_TOPMOST if on_top else HWND_NOTOPMOST
+    ctypes.windll.user32.SetWindowPos(
+        _hwnd, flag, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+    )
+
+
+def _hide_window():
+    """Hide the viewport entirely (removes from taskbar too)."""
+    if _hwnd:
+        SW_HIDE = 0
+        ctypes.windll.user32.ShowWindow(_hwnd, SW_HIDE)
+
+
+def _show_window():
+    """Show the viewport and bring it to front."""
+    if _hwnd:
+        SW_SHOW = 5
+        ctypes.windll.user32.ShowWindow(_hwnd, SW_SHOW)
+        ctypes.windll.user32.SetForegroundWindow(_hwnd)
+        # Re-apply topmost if it was on
+        if app.always_on_top:
+            _set_topmost(True)
+
+
+def _get_cursor_screen_pos():
+    """Get absolute screen cursor position (Windows)."""
+    pt = ctypes.wintypes.POINT()
+    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+    return pt.x, pt.y
 
 
 # ---------------------------------------------------------------------------
@@ -150,34 +236,6 @@ def create_button_theme(color):
             dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (min(r + 25, 255), min(g + 25, 255), min(b + 25, 255)))
             dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (min(r + 40, 255), min(g + 40, 255), min(b + 40, 255)))
     return t
-
-
-# ---------------------------------------------------------------------------
-# Always-on-top toggle (Win32)
-# ---------------------------------------------------------------------------
-
-def set_always_on_top(on_top):
-    """Toggle the always-on-top flag for the viewport window using Win32 API."""
-    app.always_on_top = on_top
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-        import ctypes.wintypes
-        hwnd = ctypes.windll.user32.GetActiveWindow()
-        if not hwnd:
-            hwnd = ctypes.windll.user32.GetForegroundWindow()
-        HWND_TOPMOST = -1
-        HWND_NOTOPMOST = -2
-        SWP_NOMOVE = 0x0002
-        SWP_NOSIZE = 0x0001
-        SWP_NOACTIVATE = 0x0010
-        flag = HWND_TOPMOST if on_top else HWND_NOTOPMOST
-        ctypes.windll.user32.SetWindowPos(
-            hwnd, flag, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        )
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +285,34 @@ def bg_commit_and_push(repo_name, message):
 
 
 # ---------------------------------------------------------------------------
+# Drag-to-move (frameless window)
+# ---------------------------------------------------------------------------
+
+def mouse_down_handler(sender, app_data):
+    if sys.platform != "win32":
+        return
+    mouse_pos = dpg.get_mouse_pos(local=False)
+    # Only start drag if clicking in the title bar region
+    if mouse_pos[1] < TITLEBAR_HEIGHT:
+        app.dragging = True
+        sx, sy = _get_cursor_screen_pos()
+        vx, vy = dpg.get_viewport_pos()
+        app.drag_offset_x = sx - vx
+        app.drag_offset_y = sy - vy
+
+
+def mouse_drag_handler(sender, app_data):
+    if not app.dragging:
+        return
+    sx, sy = _get_cursor_screen_pos()
+    dpg.set_viewport_pos([sx - app.drag_offset_x, sy - app.drag_offset_y])
+
+
+def mouse_release_handler(sender, app_data):
+    app.dragging = False
+
+
+# ---------------------------------------------------------------------------
 # UI callbacks
 # ---------------------------------------------------------------------------
 
@@ -267,7 +353,8 @@ def cb_auto_generate(sender, app_data):
 
 
 def cb_always_on_top(sender, app_data):
-    set_always_on_top(dpg.get_value(sender))
+    app.always_on_top = dpg.get_value(sender)
+    _set_topmost(app.always_on_top)
 
 
 def cb_generate(sender, app_data, user_data):
@@ -310,9 +397,16 @@ def cb_regen(sender, app_data, user_data):
     executor.submit(bg_generate_message, repo_name)
 
 
-def cb_hide_to_tray(sender, app_data):
-    """Move the window off-screen to simulate hide-to-tray."""
-    dpg.set_viewport_pos([-10000, -10000])
+def cb_minimize(sender, app_data):
+    dpg.minimize_viewport()
+
+
+def cb_close(sender, app_data):
+    """Hide to tray if available, otherwise quit."""
+    if _has_tray and sys.platform == "win32":
+        _hide_window()
+    else:
+        dpg.stop_dearpygui()
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +425,7 @@ def setup_tray():
     except ImportError:
         return
 
-    # Simple icon: blue rounded rectangle on dark background
+    # Simple icon: blue rounded rect with white lines (looks like a commit list)
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle([4, 4, 60, 60], radius=10, fill=(100, 140, 230, 255))
@@ -529,7 +623,6 @@ def process_queue():
                     dpg.set_value(rs.input_tag, "")
                 dpg.set_value(rs.status_tag, "Committed & pushed!")
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
-                # Re-poll to refresh
                 executor.submit(bg_poll_repos)
             else:
                 rs.gen_status = GenStatus.ERROR
@@ -537,7 +630,7 @@ def process_queue():
                 update_repo_status(rs)
 
         elif kind == "tray_show":
-            dpg.set_viewport_pos([100, 100])
+            _show_window()
 
         elif kind == "tray_quit":
             dpg.stop_dearpygui()
@@ -579,15 +672,14 @@ def main():
 
     dpg.create_context()
 
-    # Viewport: native decorated window (movable + resizable)
+    # Frameless viewport (no OS title bar — we draw our own)
     dpg.create_viewport(
         title="AI Commit Monitor",
         width=520,
         height=600,
         min_width=400,
         min_height=300,
-        decorated=True,
-        always_on_top=app.always_on_top,
+        decorated=False,
     )
 
     # Theme
@@ -606,9 +698,27 @@ def main():
     ):
         pass
 
+    # Mouse handlers for drag-to-move
+    with dpg.handler_registry():
+        dpg.add_mouse_down_handler(button=dpg.mvMouseButton_Left, callback=mouse_down_handler)
+        dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Left, threshold=1, callback=mouse_drag_handler)
+        dpg.add_mouse_release_handler(button=dpg.mvMouseButton_Left, callback=mouse_release_handler)
+
     # Main window
     with dpg.window(tag="primary", no_title_bar=True, no_resize=False,
                     no_move=True, no_close=True):
+
+        # Custom title bar (drag region = top TITLEBAR_HEIGHT pixels)
+        with dpg.group(horizontal=True):
+            dpg.add_text("AI Commit Monitor", color=COL_ACCENT)
+            dpg.add_spacer(width=-1)
+
+        with dpg.group(horizontal=True):
+            dpg.add_spacer(width=-1)
+            dpg.add_button(label=" - ", callback=cb_minimize, width=30)
+            dpg.add_button(label=" X ", callback=cb_close, width=30)
+
+        dpg.add_separator()
 
         # Settings bar
         with dpg.group(horizontal=True):
@@ -631,8 +741,6 @@ def main():
             dpg.add_spacer(width=10)
             dpg.add_checkbox(label="Always on top", default_value=app.always_on_top,
                              callback=cb_always_on_top)
-            dpg.add_spacer(width=10)
-            dpg.add_button(label="Hide to tray", callback=cb_hide_to_tray, tag="hide_btn")
 
         dpg.add_separator()
 
@@ -646,10 +754,17 @@ def main():
     dpg.setup_dearpygui()
     dpg.show_viewport()
 
-    # System tray (after viewport is visible)
+    # Now that the viewport exists, cache HWND and apply Win32 tweaks
+    if sys.platform == "win32":
+        # Small delay so the window is fully created
+        dpg.render_dearpygui_frame()
+        _cache_hwnd()
+        _add_resize_border()
+        if app.always_on_top:
+            _set_topmost(True)
+
+    # System tray
     setup_tray()
-    if not _has_tray:
-        dpg.configure_item("hide_btn", show=False)
 
     # Initial poll
     trigger_poll()
@@ -658,7 +773,6 @@ def main():
     while dpg.is_dearpygui_running():
         process_queue()
 
-        # Check if it's time to poll again
         now = time.time()
         if now - app.last_poll >= app.poll_interval:
             trigger_poll()
