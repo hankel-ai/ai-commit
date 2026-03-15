@@ -113,6 +113,10 @@ if sys.platform == "win32":
     _user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
     _user32.IsWindowVisible.restype = ctypes.c_bool
 
+    # GetAsyncKeyState (poll physical button state — works regardless of GLFW)
+    _user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+    _user32.GetAsyncKeyState.restype = ctypes.c_short
+
     # EnumWindows
     WNDENUMPROC = ctypes.WINFUNCTYPE(
         ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p
@@ -355,17 +359,25 @@ def bg_commit_and_push(repo_name, message):
 
 
 # ---------------------------------------------------------------------------
-# Drag-to-move handlers (pure Win32 — no DPG coordinate functions)
+# Drag-to-move — initial click via DPG, ongoing drag polled via Win32
+# in the render loop (bypasses GLFW mouse tracking entirely).
 # ---------------------------------------------------------------------------
+
+VK_LBUTTON = 0x01
 
 def mouse_down_handler(sender, app_data):
     """On left-click in the title bar, record start positions for drag."""
     global _drag_start
     if sys.platform != "win32" or not _hwnd:
         return
-    # Use DPG mouse pos ONLY to check if click is in title bar region
-    mouse_pos = dpg.get_mouse_pos(local=False)
-    if mouse_pos[1] >= TITLEBAR_HEIGHT:
+    # Check if cursor is in title bar using Win32 screen coordinates
+    pt = ctypes.wintypes.POINT()
+    _user32.GetCursorPos(ctypes.byref(pt))
+    rect = ctypes.wintypes.RECT()
+    _user32.GetWindowRect(_hwnd, ctypes.byref(rect))
+    if pt.y - rect.top >= TITLEBAR_HEIGHT:
+        return
+    if pt.x < rect.left or pt.x > rect.right:
         return
     # Don't drag if clicking title bar buttons
     try:
@@ -374,17 +386,20 @@ def mouse_down_handler(sender, app_data):
             return
     except Exception:
         pass
-    # Capture cursor and window positions via Win32
-    pt = ctypes.wintypes.POINT()
-    _user32.GetCursorPos(ctypes.byref(pt))
-    rect = ctypes.wintypes.RECT()
-    _user32.GetWindowRect(_hwnd, ctypes.byref(rect))
     _drag_start = (pt.x, pt.y, rect.left, rect.top)
 
 
-def mouse_drag_handler(sender, app_data):
-    """While dragging, move the window using Win32 SetWindowPos."""
+def _poll_drag():
+    """Called every frame from the render loop. Moves the window while
+    the left mouse button is physically held down. Uses GetAsyncKeyState
+    and GetCursorPos — completely independent of GLFW/DPG mouse tracking.
+    """
+    global _drag_start
     if _drag_start is None or not _hwnd:
+        return
+    # Check if left mouse button is still physically pressed
+    if not (_user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000):
+        _drag_start = None
         return
     pt = ctypes.wintypes.POINT()
     _user32.GetCursorPos(ctypes.byref(pt))
@@ -398,12 +413,6 @@ def mouse_drag_handler(sender, app_data):
         _hwnd, None, new_x, new_y, 0, 0,
         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
     )
-
-
-def mouse_release_handler(sender, app_data):
-    """Stop dragging on mouse release."""
-    global _drag_start
-    _drag_start = None
 
 
 # ---------------------------------------------------------------------------
@@ -792,14 +801,10 @@ def main():
     ):
         pass
 
-    # Mouse handlers for drag-to-move
+    # Mouse-down handler to initiate drag (ongoing drag is polled in render loop)
     with dpg.handler_registry():
         dpg.add_mouse_down_handler(button=dpg.mvMouseButton_Left,
                                    callback=mouse_down_handler)
-        dpg.add_mouse_drag_handler(button=dpg.mvMouseButton_Left,
-                                   callback=mouse_drag_handler, threshold=1)
-        dpg.add_mouse_release_handler(button=dpg.mvMouseButton_Left,
-                                      callback=mouse_release_handler)
 
     # Main window
     with dpg.window(tag="primary", no_title_bar=True, no_resize=False,
@@ -877,6 +882,10 @@ def main():
     _hwnd_retry_count = 0
     while dpg.is_dearpygui_running():
         process_queue()
+
+        # Poll-based drag (runs outside GLFW event processing)
+        if sys.platform == "win32":
+            _poll_drag()
 
         # Retry HWND detection if it failed at startup
         if sys.platform == "win32" and not _hwnd_ready and _hwnd_retry_count < 60:
