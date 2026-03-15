@@ -170,6 +170,7 @@ COL_WHITE = (220, 220, 225)
 
 _SETTINGS_FILE = Path(__file__).resolve().parent / "ai-commit-gui-settings.json"
 _ICON_FILE = Path(__file__).resolve().parent / "ai-commit-icon.ico"
+_DEFAULT_MODEL = "qwen3-coder:480b-cloud"
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +197,7 @@ def _save_settings():
             "auto_generate": app.auto_generate,
             "always_on_top": app.always_on_top,
             "poll_interval": app.poll_interval,
+            "model": app.model,
         }
         _SETTINGS_FILE.write_text(json.dumps(data))
     except Exception:
@@ -469,6 +471,17 @@ def cb_accept(sender, app_data, user_data):
     dpg.configure_item(rs.status_tag, color=COL_YELLOW)
     executor.submit(bg_commit_and_push, repo_name, message)
 
+
+
+def cb_model_changed(sender, app_data):
+    val = dpg.get_value(sender).strip()
+    if val:
+        app.model = val
+
+
+def cb_model_reset(sender, app_data):
+    app.model = _DEFAULT_MODEL
+    dpg.set_value("model_input", _DEFAULT_MODEL)
 
 
 def cb_hide_to_tray(sender, app_data):
@@ -845,6 +858,8 @@ def main():
         app.auto_generate = saved.get("auto_generate", False)
         app.always_on_top = saved.get("always_on_top", False)
         app.poll_interval = saved.get("poll_interval", 30)
+        if "model" in saved:
+            app.model = saved["model"]
     if args.topmost:
         app.always_on_top = True
     if args.poll != 30:  # user explicitly passed --poll
@@ -913,10 +928,19 @@ def main():
 
         dpg.add_separator()
 
-        # Scrollable repos container
-        with dpg.child_window(tag="repos_container", autosize_x=True, autosize_y=True,
-                              border=False):
+        # Scrollable repos container (negative height reserves space for model bar)
+        with dpg.child_window(tag="repos_container", autosize_x=True,
+                              height=-35, border=False):
             dpg.add_text("Scanning...", color=COL_DIM)
+
+        # Model bar at bottom
+        dpg.add_separator()
+        with dpg.group(horizontal=True):
+            dpg.add_text("Model:", color=COL_DIM)
+            dpg.add_input_text(tag="model_input", default_value=app.model,
+                               width=-60, callback=cb_model_changed,
+                               on_enter=True)
+            dpg.add_button(label="Reset", callback=cb_model_reset)
 
     dpg.set_primary_window("primary", True)
 
