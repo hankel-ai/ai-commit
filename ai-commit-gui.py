@@ -750,6 +750,8 @@ def build_repo_section(rs, parent):
     """Build the UI section for a single repo inside *parent*."""
     change_count = len(rs.entries)
     label = f"{rs.name}/ ({change_count} change{'s' if change_count != 1 else ''})" if change_count else f"{rs.name}/ (clean)"
+    if rs.last_commit_date:
+        label += f"  [{rs.last_commit_date}]"
 
     rs.header_tag = dpg.add_collapsing_header(
         label=label,
