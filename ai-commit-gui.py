@@ -112,6 +112,18 @@ if sys.platform == "win32":
     _user32.SetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
     _user32.SetWindowLongW.restype = ctypes.c_long
 
+    # CreateWindowExW
+    _user32.CreateWindowExW.argtypes = [
+        ctypes.c_ulong, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_ulong,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    _user32.CreateWindowExW.restype = ctypes.c_void_p
+
+    # SetWindowLongPtrW (pointer-width variant for 64-bit HWND values)
+    _user32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+    _user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+
     # EnumWindows
     WNDENUMPROC = ctypes.WINFUNCTYPE(
         ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p
@@ -296,27 +308,28 @@ def _set_topmost(on_top):
     )
 
 
-def _hide_taskbar_icon():
-    """Remove the window from the taskbar using WS_EX_TOOLWINDOW.
+_hidden_owner_hwnd = None
 
-    Also restores minimize/maximize buttons that WS_EX_TOOLWINDOW removes.
+
+def _hide_taskbar_icon():
+    """Remove the window from the taskbar by giving it a hidden owner window.
+
+    A top-level window with an owner does not appear in the taskbar.
+    This avoids WS_EX_TOOLWINDOW which shrinks the title bar.
     """
+    global _hidden_owner_hwnd
     if not _hwnd:
         return
-    GWL_EXSTYLE = -20
-    GWL_STYLE = -16
-    WS_EX_TOOLWINDOW = 0x00000080
-    WS_EX_APPWINDOW = 0x00040000
-    WS_MINIMIZEBOX = 0x00020000
-    WS_MAXIMIZEBOX = 0x00010000
-    # Hide from taskbar
-    ex_style = _user32.GetWindowLongW(_hwnd, GWL_EXSTYLE)
-    ex_style = (ex_style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
-    _user32.SetWindowLongW(_hwnd, GWL_EXSTYLE, ex_style)
-    # Restore minimize/maximize buttons
-    style = _user32.GetWindowLongW(_hwnd, GWL_STYLE)
-    style = style | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
-    _user32.SetWindowLongW(_hwnd, GWL_STYLE, style)
+    # Create a tiny hidden window to act as owner
+    WS_POPUP = 0x80000000
+    _hidden_owner_hwnd = _user32.CreateWindowExW(
+        0, "Static", None, WS_POPUP,
+        0, 0, 0, 0,
+        None, None, None, None,
+    )
+    # Setting GWLP_HWNDPARENT on a top-level window sets its *owner*
+    GWLP_HWNDPARENT = -8
+    _user32.SetWindowLongPtrW(_hwnd, GWLP_HWNDPARENT, _hidden_owner_hwnd)
 
 
 def _hide_window():
