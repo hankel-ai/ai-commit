@@ -939,9 +939,9 @@ def rebuild_repos_ui(results):
                 update_repo_status(rs)
                 executor.submit(bg_generate_message, name)
 
-    # Notify tray if window is hidden and there are repos with changes
-    if _window_hidden and any_changes:
-        _set_tray_alert(True)
+    # Update tray alert based on whether any repos have changes
+    if _window_hidden:
+        _set_tray_alert(any_changes)
 
 
 # ---------------------------------------------------------------------------
