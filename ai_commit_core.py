@@ -110,7 +110,7 @@ def get_last_commit(cwd):
     try:
         from datetime import datetime
         dt = datetime.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
-        short_date = dt.strftime("%b %d %H:%M")
+        short_date = dt.strftime("%b %d %I:%M%p").replace("AM", "am").replace("PM", "pm")
     except (ValueError, IndexError):
         short_date = date_str[:16]
     return subject, short_date

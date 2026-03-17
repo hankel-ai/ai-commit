@@ -212,6 +212,7 @@ COL_DIM = (120, 120, 130)
 COL_WHITE = (220, 220, 225)
 
 _SETTINGS_FILE = Path(__file__).resolve().parent / "ai-commit-gui-settings.json"
+_LOCK_FILE = Path(__file__).resolve().parent / ".ai-commit-gui.lock"
 _ICON_FILE = Path(__file__).resolve().parent / "ai-commit-icon.ico"
 _DEFAULT_MODEL = "qwen3-coder:480b-cloud"
 
@@ -1092,9 +1093,29 @@ green_btn_theme = None
 link_btn_theme = None
 
 
+_lock_fh = None
+
+
+def _acquire_instance_lock():
+    """Ensure only one copy of the app runs. Exit if another is already running."""
+    global _lock_fh
+    _lock_fh = open(_LOCK_FILE, "w")
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            msvcrt.locking(_lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, IOError):
+        print("AI Commit Monitor is already running.", file=sys.stderr)
+        sys.exit(0)
+
+
 def main():
     global green_btn_theme, link_btn_theme, _pending_topmost
 
+    _acquire_instance_lock()
     args = parse_args()
     app.model = args.model
     app.ollama_url = args.url

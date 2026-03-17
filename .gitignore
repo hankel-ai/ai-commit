@@ -2,3 +2,4 @@ __pycache__/
 .venv/
 ai-commit-gui-settings.json
 ai-commit-icon.ico
+.ai-commit-gui.lock
