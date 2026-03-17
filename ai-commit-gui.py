@@ -866,7 +866,7 @@ def build_repo_section(rs, parent, label_width=0):
     # Links row: Open Folder, GitHub, last commit
     with dpg.group(horizontal=True, parent=rs.header_tag):
         folder_btn = dpg.add_button(
-            label="Folder" if sys.platform != "darwin" else "Finder",
+            label="Folder",
             callback=cb_open_folder, user_data=str(rs.path))
         dpg.bind_item_theme(folder_btn, link_btn_theme)
         if rs.remote_url:
@@ -914,8 +914,9 @@ def build_repo_section(rs, parent, label_width=0):
 
         # Buttons row
         with dpg.group(horizontal=True, parent=rs.header_tag):
-            rs.gen_btn_tag = dpg.add_button(label="Generate", callback=cb_generate, user_data=rs.name)
-            rs.accept_btn_tag = dpg.add_button(label="Accept & Push", callback=cb_accept, user_data=rs.name)
+            repo_key = str(rs.path)
+            rs.gen_btn_tag = dpg.add_button(label="Generate", callback=cb_generate, user_data=repo_key)
+            rs.accept_btn_tag = dpg.add_button(label="Accept & Push", callback=cb_accept, user_data=repo_key)
             dpg.bind_item_theme(rs.accept_btn_tag, green_btn_theme)
 
         dpg.add_spacer(height=4, parent=rs.header_tag)
@@ -1010,7 +1011,7 @@ def rebuild_repos_ui(results):
 
         rs = RepoState(
             path=info["path"],
-            name=name,
+            name=info["path"].name,
             entries=new_entries,
             commit_message=msg,
             gen_status=gen,
