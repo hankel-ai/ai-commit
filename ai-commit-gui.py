@@ -198,6 +198,8 @@ app = AppState()
 ui_queue = queue.Queue()
 executor = ThreadPoolExecutor(max_workers=4)
 _hwnd = None  # Cached viewport HWND (Windows)
+_nswindow = None  # Cached NSWindow (macOS)
+_pending_topmost = None  # Deferred macOS topmost change (True/False/None)
 _window_hidden = False  # True when hidden to tray
 
 # Color palette
@@ -285,8 +287,26 @@ def _generate_icon():
 
 
 # ---------------------------------------------------------------------------
-# Win32 helpers
+# Platform window helpers
 # ---------------------------------------------------------------------------
+
+def _cache_nswindow():
+    """Find and cache the viewport NSWindow on macOS."""
+    global _nswindow
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import NSApplication
+        for win in NSApplication.sharedApplication().windows():
+            try:
+                if win.title() == "AI Commit Monitor":
+                    _nswindow = win
+                    return
+            except Exception:
+                continue
+    except Exception:
+        pass
+
 
 def _cache_hwnd():
     """Find and cache the viewport HWND using EnumWindows."""
@@ -324,18 +344,24 @@ def _set_dark_title_bar():
 
 
 def _set_topmost(on_top):
-    """Set or clear the TOPMOST flag via Win32."""
-    if not _hwnd:
-        return
-    HWND_TOPMOST = ctypes.c_void_p(-1)
-    HWND_NOTOPMOST = ctypes.c_void_p(-2)
-    SWP_NOMOVE = 0x0002
-    SWP_NOSIZE = 0x0001
-    SWP_NOACTIVATE = 0x0010
-    flag = HWND_TOPMOST if on_top else HWND_NOTOPMOST
-    _user32.SetWindowPos(
-        _hwnd, flag, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-    )
+    """Set or clear the always-on-top flag (cross-platform)."""
+    if sys.platform == "win32":
+        if not _hwnd:
+            return
+        HWND_TOPMOST = ctypes.c_void_p(-1)
+        HWND_NOTOPMOST = ctypes.c_void_p(-2)
+        SWP_NOMOVE = 0x0002
+        SWP_NOSIZE = 0x0001
+        SWP_NOACTIVATE = 0x0010
+        flag = HWND_TOPMOST if on_top else HWND_NOTOPMOST
+        _user32.SetWindowPos(
+            _hwnd, flag, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    elif sys.platform == "darwin":
+        # Defer to run between render frames — calling setLevel_ during a
+        # DPG/GLFW render callback causes a SIGTRAP crash.
+        global _pending_topmost
+        _pending_topmost = on_top
 
 
 _hidden_owner_hwnd = None
@@ -489,7 +515,10 @@ def bg_commit_and_push(repo_name, message):
 # ---------------------------------------------------------------------------
 
 def _native_folder_dialog(initial_dir):
-    """Show native folder picker in a subprocess, return selected path or ''."""
+    """Show native folder picker, return selected path or ''."""
+    if sys.platform == "darwin":
+        return _native_folder_dialog_macos(initial_dir)
+    # Windows / Linux: use tkinter in a subprocess
     script = (
         "import tkinter as tk; from tkinter import filedialog; "
         "root = tk.Tk(); root.withdraw(); root.attributes('-topmost', True); "
@@ -502,6 +531,30 @@ def _native_folder_dialog(initial_dir):
     result = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True, text=True, **kwargs,
+    )
+    return result.stdout.strip()
+
+
+def _native_folder_dialog_macos(initial_dir):
+    """Show native NSOpenPanel folder picker on macOS via subprocess.
+
+    NSOpenPanel must run on the main thread of its process, so we spawn a
+    small helper that owns the Cocoa event loop.
+    """
+    script = (
+        "from AppKit import NSOpenPanel, NSURL, NSApplication; "
+        "NSApplication.sharedApplication().setActivationPolicy_(0); "
+        "panel = NSOpenPanel.openPanel(); "
+        "panel.setCanChooseFiles_(False); "
+        "panel.setCanChooseDirectories_(True); "
+        "panel.setAllowsMultipleSelection_(False); "
+        f"panel.setDirectoryURL_(NSURL.fileURLWithPath_({str(initial_dir)!r})); "
+        "ret = panel.runModal(); "
+        "print(str(panel.URL().path()) if ret == 1 else '')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True,
     )
     return result.stdout.strip()
 
@@ -1040,7 +1093,7 @@ link_btn_theme = None
 
 
 def main():
-    global green_btn_theme, link_btn_theme
+    global green_btn_theme, link_btn_theme, _pending_topmost
 
     args = parse_args()
     app.model = args.model
@@ -1162,11 +1215,13 @@ def main():
     if saved and "x" in saved and "y" in saved:
         dpg.set_viewport_pos([saved["x"], saved["y"]])
 
-    # Cache HWND for always-on-top and tray operations
+    # Let a few frames render so the native window exists
+    for _ in range(10):
+        dpg.render_dearpygui_frame()
+
+    # Cache native window handle for always-on-top and tray operations
     _hwnd_ready = False
     if sys.platform == "win32":
-        for _ in range(10):
-            dpg.render_dearpygui_frame()
         _cache_hwnd()
         if _hwnd:
             if app.always_on_top:
@@ -1174,6 +1229,10 @@ def main():
             _hwnd_ready = True
         if _debug_mode:
             print(f"[debug] HWND={_hwnd} ready={_hwnd_ready}", flush=True)
+    elif sys.platform == "darwin":
+        _cache_nswindow()
+        if _nswindow and app.always_on_top:
+            _set_topmost(True)
 
     # System tray
     setup_tray()
@@ -1209,6 +1268,14 @@ def main():
             trigger_poll()
 
         dpg.render_dearpygui_frame()
+
+        # Apply deferred macOS topmost change between frames
+        if _pending_topmost is not None and _nswindow:
+            try:
+                _nswindow.setLevel_(3 if _pending_topmost else 0)
+            except Exception:
+                pass
+            _pending_topmost = None
 
     # Save window geometry before cleanup
     _save_settings()
