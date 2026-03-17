@@ -180,8 +180,8 @@ class RepoState:
 
 @dataclass
 class AppState:
-    watched_folder: Path = field(default_factory=lambda: Path("."))
-    repos: dict = field(default_factory=dict)  # name -> RepoState
+    watched_folders: list = field(default_factory=list)  # list of Path
+    repos: dict = field(default_factory=dict)  # repo_key -> RepoState
     poll_interval: int = 30
     auto_generate: bool = False
     always_on_top: bool = False
@@ -242,7 +242,7 @@ def _save_settings():
             "always_on_top": app.always_on_top,
             "poll_interval": app.poll_interval,
             "model": app.model,
-            "watched_folder": str(app.watched_folder),
+            "watched_folders": [str(f) for f in app.watched_folders],
         }
         _SETTINGS_FILE.write_text(json.dumps(data))
     except Exception:
@@ -458,25 +458,26 @@ def create_button_theme(color):
 
 def bg_poll_repos():
     """Discover repos and get status for each. Posts results to ui_queue."""
-    folder = app.watched_folder
-    repo_paths = discover_repos(folder)
     results = {}
-    for rp in repo_paths:
-        entries = get_status(rp)
-        last_msg, last_date = get_last_commit(rp)
-        # Cache remote URL: only fetch for new repos
-        existing = app.repos.get(rp.name)
-        if existing and existing.remote_url:
-            remote_url = existing.remote_url
-        else:
-            remote_url = get_remote_url(rp)
-        results[rp.name] = {
-            "path": rp,
-            "entries": entries,
-            "remote_url": remote_url,
-            "last_commit_msg": last_msg,
-            "last_commit_date": last_date,
-        }
+    for folder in app.watched_folders:
+        repo_paths = discover_repos(folder)
+        for rp in repo_paths:
+            repo_key = str(rp)
+            entries = get_status(rp)
+            last_msg, last_date = get_last_commit(rp)
+            # Cache remote URL: only fetch for new repos
+            existing = app.repos.get(repo_key)
+            if existing and existing.remote_url:
+                remote_url = existing.remote_url
+            else:
+                remote_url = get_remote_url(rp)
+            results[repo_key] = {
+                "path": rp,
+                "entries": entries,
+                "remote_url": remote_url,
+                "last_commit_msg": last_msg,
+                "last_commit_date": last_date,
+            }
     ui_queue.put(("poll_result", results))
 
 
@@ -562,7 +563,8 @@ def _native_folder_dialog_macos(initial_dir):
 
 def bg_browse():
     """Run native folder picker in background, post result to UI queue."""
-    chosen = _native_folder_dialog(app.watched_folder)
+    initial = app.watched_folders[-1] if app.watched_folders else Path(".")
+    chosen = _native_folder_dialog(initial)
     if chosen:
         ui_queue.put(("folder_selected", chosen))
 
@@ -611,6 +613,28 @@ def cb_generate(sender, app_data, user_data):
 def cb_open_repo_url(sender, app_data, user_data):
     if user_data:
         webbrowser.open(user_data)
+
+
+def cb_open_folder(sender, app_data, user_data):
+    """Open a folder in Finder (macOS) or Explorer (Windows)."""
+    if not user_data:
+        return
+    path = str(user_data)
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", path])
+    elif sys.platform == "win32":
+        subprocess.Popen(["explorer", path], creationflags=subprocess.CREATE_NO_WINDOW)
+    else:
+        subprocess.Popen(["xdg-open", path])
+
+
+def cb_remove_folder(sender, app_data, user_data):
+    """Remove a watched folder."""
+    folder = Path(user_data)
+    if folder in app.watched_folders:
+        app.watched_folders.remove(folder)
+        _rebuild_folders_ui()
+        trigger_poll()
 
 
 def cb_accept(sender, app_data, user_data):
@@ -781,6 +805,23 @@ def trigger_poll():
     executor.submit(bg_poll_repos)
 
 
+def _rebuild_folders_ui():
+    """Rebuild the watched-folders list in the UI."""
+    if not dpg.does_item_exist("folders_container"):
+        return
+    dpg.delete_item("folders_container", children_only=True)
+    if not app.watched_folders:
+        dpg.add_text("No folders — click Add Folder", color=COL_DIM,
+                      parent="folders_container")
+        return
+    for folder in app.watched_folders:
+        with dpg.group(horizontal=True, parent="folders_container"):
+            rm = dpg.add_button(label="x", callback=cb_remove_folder,
+                                user_data=str(folder))
+            dpg.bind_item_theme(rm, remove_btn_theme)
+            dpg.add_text(str(folder), color=COL_DIM)
+
+
 def update_repo_status(rs):
     """Update the status text for a repo based on its gen_status."""
     if rs.gen_status == GenStatus.GENERATING:
@@ -822,21 +863,24 @@ def build_repo_section(rs, parent, label_width=0):
         default_open=change_count > 0,
     )
 
-    # GitHub link + last commit info row
-    if rs.remote_url or rs.last_commit_msg:
-        with dpg.group(horizontal=True, parent=rs.header_tag):
-            if rs.remote_url:
-                btn = dpg.add_button(label="GitHub", callback=cb_open_repo_url, user_data=rs.remote_url)
-                dpg.bind_item_theme(btn, link_btn_theme)
-            if rs.last_commit_msg:
-                commit_label = rs.last_commit_msg
-                if len(commit_label) > 50:
-                    commit_label = commit_label[:47] + "..."
-                if rs.last_commit_date:
-                    commit_label = f"latest: {commit_label} — {rs.last_commit_date}"
-                else:
-                    commit_label = f"latest: {commit_label}"
-                dpg.add_text(commit_label, color=COL_DIM)
+    # Links row: Open Folder, GitHub, last commit
+    with dpg.group(horizontal=True, parent=rs.header_tag):
+        folder_btn = dpg.add_button(
+            label="Folder" if sys.platform != "darwin" else "Finder",
+            callback=cb_open_folder, user_data=str(rs.path))
+        dpg.bind_item_theme(folder_btn, link_btn_theme)
+        if rs.remote_url:
+            btn = dpg.add_button(label="GitHub", callback=cb_open_repo_url, user_data=rs.remote_url)
+            dpg.bind_item_theme(btn, link_btn_theme)
+        if rs.last_commit_msg:
+            commit_label = rs.last_commit_msg
+            if len(commit_label) > 50:
+                commit_label = commit_label[:47] + "..."
+            if rs.last_commit_date:
+                commit_label = f"latest: {commit_label} — {rs.last_commit_date}"
+            else:
+                commit_label = f"latest: {commit_label}"
+            dpg.add_text(commit_label, color=COL_DIM)
 
     rs.files_group_tag = dpg.add_group(parent=rs.header_tag)
     for code, filepath in rs.entries:
@@ -1055,10 +1099,10 @@ def process_queue():
 
         elif kind == "folder_selected":
             chosen = msg[1]
-            folder = Path(chosen)
-            if folder.is_dir():
-                app.watched_folder = folder
-                dpg.set_value("folder_label", str(folder))
+            folder = Path(chosen).resolve()
+            if folder.is_dir() and folder not in app.watched_folders:
+                app.watched_folders.append(folder)
+                _rebuild_folders_ui()
                 trigger_poll()
 
         elif kind == "tray_show":
@@ -1074,8 +1118,8 @@ def process_queue():
 
 def parse_args():
     parser = argparse.ArgumentParser(description="AI Commit Monitor GUI")
-    parser.add_argument("folder", nargs="?", default=".",
-                        help="Folder containing git repos to monitor")
+    parser.add_argument("folder", nargs="*",
+                        help="Folder(s) containing git repos to monitor")
     parser.add_argument("--model", default=os.environ.get("AI_COMMIT_MODEL", "qwen3-coder:480b-cloud"),
                         help="Ollama model name")
     parser.add_argument("--url", default=os.environ.get("AI_COMMIT_URL", "http://localhost:11434"),
@@ -1091,6 +1135,7 @@ def parse_args():
 
 green_btn_theme = None
 link_btn_theme = None
+remove_btn_theme = None
 
 
 _lock_fh = None
@@ -1113,13 +1158,13 @@ def _acquire_instance_lock():
 
 
 def main():
-    global green_btn_theme, link_btn_theme, _pending_topmost
+    global green_btn_theme, link_btn_theme, remove_btn_theme, _pending_topmost
 
     _acquire_instance_lock()
     args = parse_args()
     app.model = args.model
     app.ollama_url = args.url
-    folder_from_cli = args.folder != "."
+    folders_from_cli = bool(args.folder)
 
     dpg.create_context()
 
@@ -1135,16 +1180,25 @@ def main():
         app.poll_interval = saved.get("poll_interval", 30)
         if "model" in saved:
             app.model = saved["model"]
-        if not folder_from_cli and "watched_folder" in saved:
-            p = Path(saved["watched_folder"])
-            if p.is_dir():
-                app.watched_folder = p
+        if not folders_from_cli:
+            # Support new list format and migrate old single-folder format
+            saved_folders = saved.get("watched_folders", [])
+            if not saved_folders and "watched_folder" in saved:
+                saved_folders = [saved["watched_folder"]]
+            for f in saved_folders:
+                p = Path(f)
+                if p.is_dir() and p not in app.watched_folders:
+                    app.watched_folders.append(p)
 
-    # CLI folder argument takes priority over saved setting
-    if folder_from_cli:
-        app.watched_folder = Path(args.folder).resolve()
-    elif not app.watched_folder or app.watched_folder == Path("."):
-        app.watched_folder = Path(args.folder).resolve()
+    # CLI folder arguments take priority over saved settings
+    if folders_from_cli:
+        app.watched_folders = []
+        for f in args.folder:
+            p = Path(f).resolve()
+            if p.is_dir() and p not in app.watched_folders:
+                app.watched_folders.append(p)
+    if not app.watched_folders:
+        app.watched_folders = [Path(".").resolve()]
     if args.topmost:
         app.always_on_top = True
     if args.poll != 30:  # user explicitly passed --poll
@@ -1181,17 +1235,24 @@ def main():
             dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 2, 2)
             dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 2)
 
+    # Small remove-button theme (red text, no background)
+    with dpg.theme() as remove_btn_theme:
+        with dpg.theme_component(dpg.mvButton):
+            dpg.add_theme_color(dpg.mvThemeCol_Button, (0, 0, 0, 0))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (220, 80, 80, 40))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (220, 80, 80, 80))
+            dpg.add_theme_color(dpg.mvThemeCol_Text, COL_RED)
+            dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 2, 2)
+
     # Main window
     with dpg.window(tag="primary", no_title_bar=True, no_resize=False,
                     no_move=True, no_close=True):
 
-        # Settings bar
-        with dpg.group(horizontal=True):
-            dpg.add_text("Watching:", color=COL_DIM)
-            dpg.add_text(str(app.watched_folder), tag="folder_label")
+        # Watched folders
+        dpg.add_group(tag="folders_container")
 
         with dpg.group(horizontal=True):
-            dpg.add_button(label="Browse", callback=cb_browse)
+            dpg.add_button(label="Add Folder", callback=cb_browse)
             dpg.add_button(label="Refresh", callback=cb_refresh)
             dpg.add_spacer(width=10)
             dpg.add_text("Poll:", color=COL_DIM)
@@ -1261,7 +1322,8 @@ def main():
     if _hwnd_ready:
         _hide_taskbar_icon()
 
-    # Initial poll
+    # Build initial folders list and poll
+    _rebuild_folders_ui()
     trigger_poll()
 
     # Render loop
