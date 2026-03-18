@@ -628,6 +628,27 @@ def cb_open_folder(sender, app_data, user_data):
         subprocess.Popen(["xdg-open", path])
 
 
+def cb_gitignore(sender, app_data, user_data):
+    """Add a file or folder to the repo's .gitignore and refresh."""
+    repo_key, filepath = user_data
+    repo_path = Path(repo_key)
+    gitignore = repo_path / ".gitignore"
+    entry = filepath.rstrip("/")
+    # Check if already present
+    existing = ""
+    if gitignore.exists():
+        existing = gitignore.read_text(encoding="utf-8", errors="replace")
+        if entry in {line.strip() for line in existing.splitlines()}:
+            trigger_poll()
+            return
+    # Append entry (ensure trailing newline before our addition)
+    with open(gitignore, "a", encoding="utf-8") as f:
+        if existing and not existing.endswith("\n"):
+            f.write("\n")
+        f.write(entry + "\n")
+    trigger_poll()
+
+
 def cb_remove_folder(sender, app_data, user_data):
     """Remove a watched folder."""
     folder = Path(user_data)
@@ -889,6 +910,14 @@ def build_repo_section(rs, parent, label_width=0):
         with dpg.group(horizontal=True, parent=rs.files_group_tag):
             dpg.add_text(f"  {lbl:>10}", color=color)
             dpg.add_text(f"  {filepath}")
+            if code == "??":
+                dpg.add_spacer(width=-1)
+                btn = dpg.add_button(
+                    label="gitignore",
+                    callback=cb_gitignore,
+                    user_data=(str(rs.path), filepath),
+                )
+                dpg.bind_item_theme(btn, link_btn_theme)
 
     if not rs.entries:
         dpg.add_text("  No changes", color=COL_DIM, parent=rs.files_group_tag)
