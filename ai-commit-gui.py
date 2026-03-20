@@ -1077,7 +1077,7 @@ def rebuild_repos_ui(results):
         if old_rs is not None:
             files_changed = (old_rs.entries != new_entries)
 
-        if new_entries:
+        if new_entries or info.get("behind", 0) > 0:
             any_changes = True
 
         # Decide what to keep
