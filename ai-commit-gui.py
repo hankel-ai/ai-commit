@@ -628,6 +628,27 @@ def cb_open_folder(sender, app_data, user_data):
         subprocess.Popen(["xdg-open", path])
 
 
+def cb_gitignore(sender, app_data, user_data):
+    """Add a file or folder to the repo's .gitignore and refresh."""
+    repo_key, filepath = user_data
+    repo_path = Path(repo_key)
+    gitignore = repo_path / ".gitignore"
+    entry = filepath.rstrip("/")
+    # Check if already present
+    existing = ""
+    if gitignore.exists():
+        existing = gitignore.read_text(encoding="utf-8", errors="replace")
+        if entry in {line.strip() for line in existing.splitlines()}:
+            trigger_poll()
+            return
+    # Append entry (ensure trailing newline before our addition)
+    with open(gitignore, "a", encoding="utf-8") as f:
+        if existing and not existing.endswith("\n"):
+            f.write("\n")
+        f.write(entry + "\n")
+    trigger_poll()
+
+
 def cb_remove_folder(sender, app_data, user_data):
     """Remove a watched folder."""
     folder = Path(user_data)
@@ -635,28 +656,6 @@ def cb_remove_folder(sender, app_data, user_data):
         app.watched_folders.remove(folder)
         _rebuild_folders_ui()
         trigger_poll()
-
-
-def cb_gitignore(sender, app_data, user_data):
-    """Add a file to the repo's .gitignore and re-poll."""
-    repo_key, filepath = user_data
-    rs = app.repos.get(repo_key)
-    if not rs:
-        return
-    gitignore = rs.path / ".gitignore"
-    # Append the entry (create file if needed)
-    try:
-        existing = gitignore.read_text() if gitignore.exists() else ""
-        entry = filepath.rstrip("/")
-        # Don't add duplicates
-        if entry not in existing.splitlines():
-            with open(gitignore, "a") as f:
-                if existing and not existing.endswith("\n"):
-                    f.write("\n")
-                f.write(entry + "\n")
-        trigger_poll()
-    except Exception as exc:
-        print(f"Failed to update .gitignore: {exc}", file=sys.stderr)
 
 
 def cb_accept(sender, app_data, user_data):
@@ -913,8 +912,12 @@ def build_repo_section(rs, parent, label_width=0):
             dpg.add_text(f"  {lbl:>10}", color=color)
             dpg.add_text(f"  {filepath}")
             if code == "??":
-                btn = dpg.add_button(label="gitignore", callback=cb_gitignore,
-                                     user_data=(repo_key, filepath))
+                dpg.add_spacer(width=-1)
+                btn = dpg.add_button(
+                    label="gitignore",
+                    callback=cb_gitignore,
+                    user_data=(str(rs.path), filepath),
+                )
                 dpg.bind_item_theme(btn, link_btn_theme)
 
     if not rs.entries:
