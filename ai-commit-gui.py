@@ -637,6 +637,28 @@ def cb_remove_folder(sender, app_data, user_data):
         trigger_poll()
 
 
+def cb_gitignore(sender, app_data, user_data):
+    """Add a file to the repo's .gitignore and re-poll."""
+    repo_key, filepath = user_data
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    gitignore = rs.path / ".gitignore"
+    # Append the entry (create file if needed)
+    try:
+        existing = gitignore.read_text() if gitignore.exists() else ""
+        entry = filepath.rstrip("/")
+        # Don't add duplicates
+        if entry not in existing.splitlines():
+            with open(gitignore, "a") as f:
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
+                f.write(entry + "\n")
+        trigger_poll()
+    except Exception as exc:
+        print(f"Failed to update .gitignore: {exc}", file=sys.stderr)
+
+
 def cb_accept(sender, app_data, user_data):
     repo_name = user_data
     rs = app.repos.get(repo_name)
@@ -883,12 +905,17 @@ def build_repo_section(rs, parent, label_width=0):
             dpg.add_text(commit_label, color=COL_DIM)
 
     rs.files_group_tag = dpg.add_group(parent=rs.header_tag)
+    repo_key = str(rs.path)
     for code, filepath in rs.entries:
         lbl = STATUS_LABELS.get(code, code)
         color = COL_GREEN if code in ("A", "AM", "??") else COL_YELLOW if code in ("M", "MM") else COL_RED if code == "D" else COL_DIM
         with dpg.group(horizontal=True, parent=rs.files_group_tag):
             dpg.add_text(f"  {lbl:>10}", color=color)
             dpg.add_text(f"  {filepath}")
+            if code == "??":
+                btn = dpg.add_button(label="gitignore", callback=cb_gitignore,
+                                     user_data=(repo_key, filepath))
+                dpg.bind_item_theme(btn, link_btn_theme)
 
     if not rs.entries:
         dpg.add_text("  No changes", color=COL_DIM, parent=rs.files_group_tag)
