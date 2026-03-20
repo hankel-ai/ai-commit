@@ -116,6 +116,40 @@ def get_last_commit(cwd):
     return subject, short_date
 
 
+def get_sync_status(cwd):
+    """Fetch from origin and return (ahead, behind) commit counts vs tracking branch.
+
+    Returns (0, 0) if there is no remote or no tracking branch.
+    """
+    # Fetch silently — ignore errors (offline, no remote, etc.)
+    run_git(["fetch", "--quiet"], cwd=cwd)
+
+    # Find the upstream tracking branch
+    rc, upstream, _ = run_git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd=cwd)
+    if rc != 0 or not upstream.strip():
+        return 0, 0
+
+    # Count commits ahead/behind
+    rc, stdout, _ = run_git(["rev-list", "--left-right", "--count", f"HEAD...{upstream.strip()}"], cwd=cwd)
+    if rc != 0 or not stdout.strip():
+        return 0, 0
+    parts = stdout.strip().split()
+    if len(parts) != 2:
+        return 0, 0
+    try:
+        return int(parts[0]), int(parts[1])
+    except ValueError:
+        return 0, 0
+
+
+def do_pull(cwd):
+    """Run git pull. Returns (success: bool, detail: str)."""
+    rc, stdout, stderr = run_git(["pull"], cwd=cwd)
+    if rc != 0:
+        return False, f"git pull failed: {stderr.strip()}"
+    return True, stdout.strip()
+
+
 def get_diff(cwd):
     """Build a combined diff string: staged + unstaged changes and untracked file contents."""
     parts = []

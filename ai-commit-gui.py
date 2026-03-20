@@ -54,11 +54,13 @@ from ai_commit_core import (
     default_config,
     discover_repos,
     do_commit_and_push,
+    do_pull,
     generate_message,
     get_diff,
     get_last_commit,
     get_remote_url,
     get_status,
+    get_sync_status,
 )
 
 # ---------------------------------------------------------------------------
@@ -169,6 +171,8 @@ class RepoState:
     remote_url: str = ""
     last_commit_msg: str = ""
     last_commit_date: str = ""
+    ahead: int = 0
+    behind: int = 0
     # dpg widget tags
     header_tag: int = 0
     files_group_tag: int = 0
@@ -471,12 +475,15 @@ def bg_poll_repos():
                 remote_url = existing.remote_url
             else:
                 remote_url = get_remote_url(rp)
+            ahead, behind = get_sync_status(rp)
             results[repo_key] = {
                 "path": rp,
                 "entries": entries,
                 "remote_url": remote_url,
                 "last_commit_msg": last_msg,
                 "last_commit_date": last_date,
+                "ahead": ahead,
+                "behind": behind,
             }
     ui_queue.put(("poll_result", results))
 
@@ -498,6 +505,18 @@ def bg_generate_message(repo_name):
         ui_queue.put(("gen_result", repo_name, "", str(exc)))
     except Exception as exc:
         ui_queue.put(("gen_result", repo_name, "", f"Unexpected error: {exc}"))
+
+
+def bg_pull(repo_name):
+    """Pull latest changes for a repo. Posts result to ui_queue."""
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    try:
+        ok, detail = do_pull(rs.path)
+        ui_queue.put(("pull_result", repo_name, ok, detail))
+    except Exception as exc:
+        ui_queue.put(("pull_result", repo_name, False, str(exc)))
 
 
 def bg_commit_and_push(repo_name, message):
@@ -626,6 +645,17 @@ def cb_open_folder(sender, app_data, user_data):
         subprocess.Popen(["explorer", path], creationflags=subprocess.CREATE_NO_WINDOW)
     else:
         subprocess.Popen(["xdg-open", path])
+
+
+def cb_pull(sender, app_data, user_data):
+    """Pull latest changes from remote."""
+    repo_key = user_data
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    dpg.set_value(rs.status_tag, "Pulling...")
+    dpg.configure_item(rs.status_tag, color=COL_YELLOW)
+    executor.submit(bg_pull, repo_key)
 
 
 def cb_gitignore(sender, app_data, user_data):
@@ -866,8 +896,14 @@ def _repo_base_label(rs):
     """Return the base header label (without the date portion)."""
     change_count = len(rs.entries)
     if change_count:
-        return f"{rs.name}/ ({change_count} change{'s' if change_count != 1 else ''})"
-    return f"{rs.name}/ (clean)"
+        label = f"{rs.name}/ ({change_count} change{'s' if change_count != 1 else ''})"
+    else:
+        label = f"{rs.name}/ (clean)"
+    if rs.behind > 0:
+        label += f"  !! {rs.behind} BEHIND"
+    elif rs.ahead > 0:
+        label += f"  +{rs.ahead} ahead"
+    return label
 
 
 def build_repo_section(rs, parent, label_width=0):
@@ -881,8 +917,26 @@ def build_repo_section(rs, parent, label_width=0):
     rs.header_tag = dpg.add_collapsing_header(
         label=label,
         parent=parent,
-        default_open=change_count > 0,
+        default_open=change_count > 0 or rs.behind > 0,
     )
+
+    # Sync warning banner — prominent when behind remote
+    if rs.behind > 0 or rs.ahead > 0:
+        repo_key = str(rs.path)
+        parts = []
+        if rs.behind > 0:
+            parts.append(f"{rs.behind} commit{'s' if rs.behind != 1 else ''} BEHIND remote")
+        if rs.ahead > 0:
+            parts.append(f"{rs.ahead} commit{'s' if rs.ahead != 1 else ''} ahead")
+        sync_text = " / ".join(parts)
+
+        if rs.behind > 0:
+            with dpg.group(horizontal=True, parent=rs.header_tag):
+                dpg.add_text(f"  !! {sync_text} — PULL BEFORE EDITING !!", color=COL_RED)
+                pull_btn = dpg.add_button(label="Pull", callback=cb_pull, user_data=repo_key)
+                dpg.bind_item_theme(pull_btn, pull_btn_theme)
+        else:
+            dpg.add_text(f"  {sync_text}", color=COL_YELLOW, parent=rs.header_tag)
 
     # Links row: Open Folder, GitHub, last commit
     with dpg.group(horizontal=True, parent=rs.header_tag):
@@ -1049,6 +1103,8 @@ def rebuild_repos_ui(results):
             remote_url=info.get("remote_url", ""),
             last_commit_msg=info.get("last_commit_msg", ""),
             last_commit_date=info.get("last_commit_date", ""),
+            ahead=info.get("ahead", 0),
+            behind=info.get("behind", 0),
         )
         new_repos[name] = rs
 
@@ -1128,6 +1184,18 @@ def process_queue():
                 rs.error_message = detail
                 update_repo_status(rs)
 
+        elif kind == "pull_result":
+            _, repo_name, ok, detail = msg
+            rs = app.repos.get(repo_name)
+            if rs:
+                if ok:
+                    dpg.set_value(rs.status_tag, "Pulled successfully!")
+                    dpg.configure_item(rs.status_tag, color=COL_GREEN)
+                    executor.submit(bg_poll_repos)
+                else:
+                    dpg.set_value(rs.status_tag, f"Pull failed: {detail}")
+                    dpg.configure_item(rs.status_tag, color=COL_RED)
+
         elif kind == "folder_selected":
             chosen = msg[1]
             folder = Path(chosen).resolve()
@@ -1167,6 +1235,7 @@ def parse_args():
 green_btn_theme = None
 link_btn_theme = None
 remove_btn_theme = None
+pull_btn_theme = None
 
 
 _lock_fh = None
@@ -1189,7 +1258,7 @@ def _acquire_instance_lock():
 
 
 def main():
-    global green_btn_theme, link_btn_theme, remove_btn_theme, _pending_topmost
+    global green_btn_theme, link_btn_theme, remove_btn_theme, pull_btn_theme, _pending_topmost
 
     _acquire_instance_lock()
     args = parse_args()
@@ -1255,6 +1324,7 @@ def main():
     global_theme = create_theme()
     dpg.bind_theme(global_theme)
     green_btn_theme = create_button_theme((50, 130, 75))
+    pull_btn_theme = create_button_theme((200, 60, 60))
 
     # Link-styled button theme: transparent background, accent-colored text
     with dpg.theme() as link_btn_theme:
