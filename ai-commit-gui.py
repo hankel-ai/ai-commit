@@ -159,10 +159,23 @@ class GenStatus(Enum):
     ERROR = auto()
 
 
+def _repo_name_from_url(remote_url):
+    """Extract the repository name from a git remote URL."""
+    if not remote_url:
+        return ""
+    # Strip trailing slashes and .git
+    url = remote_url.rstrip("/")
+    if url.endswith(".git"):
+        url = url[:-4]
+    # Get the last path component
+    return url.rsplit("/", 1)[-1] if "/" in url else ""
+
+
 @dataclass
 class RepoState:
     path: Path
-    name: str
+    name: str  # display name: git repo name if available, else folder name
+    folder_name: str  # actual folder name on disk
     entries: list  # list of (status_code, filepath)
     diff: str = ""
     commit_message: str = ""
@@ -895,10 +908,14 @@ def update_repo_status(rs):
 def _repo_base_label(rs):
     """Return the base header label (without the date portion)."""
     change_count = len(rs.entries)
+    name_part = rs.name
+    # Flag folder name mismatch so user can rename
+    if rs.folder_name != rs.name:
+        name_part += f"  << folder: {rs.folder_name} >>"
     if change_count:
-        label = f"{rs.name}/ ({change_count} change{'s' if change_count != 1 else ''})"
+        label = f"{name_part}/ ({change_count} change{'s' if change_count != 1 else ''})"
     else:
-        label = f"{rs.name}/ (clean)"
+        label = f"{name_part}/ (clean)"
     if rs.behind > 0:
         label += f"  !! {rs.behind} BEHIND"
     elif rs.ahead > 0:
@@ -937,6 +954,12 @@ def build_repo_section(rs, parent, label_width=0):
                 dpg.bind_item_theme(pull_btn, pull_btn_theme)
         else:
             dpg.add_text(f"  {sync_text}", color=COL_YELLOW, parent=rs.header_tag)
+
+    # Folder name mismatch warning
+    if rs.folder_name != rs.name:
+        dpg.add_text(
+            f"  ** Folder mismatch: folder is \"{rs.folder_name}\" but repo is \"{rs.name}\" **",
+            color=COL_YELLOW, parent=rs.header_tag)
 
     # Links row: Open Folder, GitHub, last commit
     with dpg.group(horizontal=True, parent=rs.header_tag):
@@ -1093,9 +1116,13 @@ def rebuild_repos_ui(results):
             else:
                 msg, gen, err = prev_msg, (GenStatus.DONE if prev_msg else GenStatus.IDLE), prev_err
 
+        folder_name = info["path"].name
+        git_name = _repo_name_from_url(info.get("remote_url", ""))
+        display_name = git_name if git_name else folder_name
         rs = RepoState(
             path=info["path"],
-            name=info["path"].name,
+            name=display_name,
+            folder_name=folder_name,
             entries=new_entries,
             commit_message=msg,
             gen_status=gen,
