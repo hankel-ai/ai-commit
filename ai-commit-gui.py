@@ -909,13 +909,13 @@ def _repo_base_label(rs):
     """Return the base header label (without the date portion)."""
     change_count = len(rs.entries)
     name_part = rs.name
-    # Flag folder name mismatch so user can rename
+    # Flag folder name mismatch with a marker
     if rs.folder_name != rs.name:
-        name_part += f"  << folder: {rs.folder_name} >>"
+        name_part = f"* {name_part}"
     if change_count:
-        label = f"{name_part}/ ({change_count} change{'s' if change_count != 1 else ''})"
+        label = f"{name_part} ({change_count} change{'s' if change_count != 1 else ''})"
     else:
-        label = f"{name_part}/ (clean)"
+        label = name_part
     if rs.behind > 0:
         label += f"  !! {rs.behind} BEHIND"
     elif rs.ahead > 0:
