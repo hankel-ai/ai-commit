@@ -45,6 +45,8 @@ def run_git(args, cwd):
         cwd=cwd,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         **kwargs,
     )
     return result.returncode, result.stdout, result.stderr
@@ -206,7 +208,13 @@ def generate_message_ollama(diff, model, base_url):
     try:
         with urllib.request.urlopen(req, timeout=120) as resp:
             body = json.loads(resp.read().decode("utf-8"))
-        return body["message"]["content"].strip()
+        content = body["message"]["content"]
+        if not content:
+            raise OllamaError(
+                f"Model '{model}' returned empty content — it may have used "
+                "thinking/tool-call mode instead of a plain text response."
+            )
+        return content.strip()
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             raise OllamaError(
