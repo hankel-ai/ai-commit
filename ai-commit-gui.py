@@ -57,6 +57,7 @@ from ai_commit_core import (
     do_pull,
     generate_message,
     get_diff,
+    get_incoming_changes,
     get_last_commit,
     get_remote_url,
     get_status,
@@ -532,6 +533,18 @@ def bg_pull(repo_name):
         ui_queue.put(("pull_result", repo_name, False, str(exc)))
 
 
+def bg_preview_pull(repo_name):
+    """Fetch incoming changes for preview. Posts result to ui_queue."""
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    try:
+        commits, diffstat = get_incoming_changes(rs.path)
+        ui_queue.put(("preview_pull_result", repo_name, commits, diffstat))
+    except Exception as exc:
+        ui_queue.put(("preview_pull_result", repo_name, "", str(exc)))
+
+
 def bg_commit_and_push(repo_name, message):
     """Commit and push for a repo. Posts result to ui_queue."""
     rs = app.repos.get(repo_name)
@@ -660,15 +673,34 @@ def cb_open_folder(sender, app_data, user_data):
         subprocess.Popen(["xdg-open", path])
 
 
-def cb_pull(sender, app_data, user_data):
-    """Pull latest changes from remote."""
+def cb_preview_pull(sender, app_data, user_data):
+    """Fetch and preview incoming changes before pulling."""
     repo_key = user_data
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    dpg.set_value(rs.status_tag, "Fetching preview...")
+    dpg.configure_item(rs.status_tag, color=COL_YELLOW)
+    executor.submit(bg_preview_pull, repo_key)
+
+
+def cb_confirm_pull(sender, app_data, user_data):
+    """User confirmed pull from the preview window."""
+    repo_key, win_tag = user_data
+    if dpg.does_item_exist(win_tag):
+        dpg.delete_item(win_tag)
     rs = app.repos.get(repo_key)
     if not rs:
         return
     dpg.set_value(rs.status_tag, "Pulling...")
     dpg.configure_item(rs.status_tag, color=COL_YELLOW)
     executor.submit(bg_pull, repo_key)
+
+
+def cb_close_preview(sender, app_data, user_data):
+    """Close preview window without pulling."""
+    if dpg.does_item_exist(user_data):
+        dpg.delete_item(user_data)
 
 
 def cb_gitignore(sender, app_data, user_data):
@@ -950,7 +982,7 @@ def build_repo_section(rs, parent, label_width=0):
         if rs.behind > 0:
             with dpg.group(horizontal=True, parent=rs.header_tag):
                 dpg.add_text(f"  !! {sync_text} — PULL BEFORE EDITING !!", color=COL_RED)
-                pull_btn = dpg.add_button(label="Pull", callback=cb_pull, user_data=repo_key)
+                pull_btn = dpg.add_button(label="Preview Pull", callback=cb_preview_pull, user_data=repo_key)
                 dpg.bind_item_theme(pull_btn, pull_btn_theme)
         else:
             dpg.add_text(f"  {sync_text}", color=COL_YELLOW, parent=rs.header_tag)
@@ -1210,6 +1242,57 @@ def process_queue():
                 rs.gen_status = GenStatus.ERROR
                 rs.error_message = detail
                 update_repo_status(rs)
+
+        elif kind == "preview_pull_result":
+            _, repo_name, commits, diffstat = msg
+            rs = app.repos.get(repo_name)
+            if rs:
+                if not commits and not diffstat:
+                    dpg.set_value(rs.status_tag, "No incoming changes found")
+                    dpg.configure_item(rs.status_tag, color=COL_DIM)
+                else:
+                    dpg.set_value(rs.status_tag, "Preview ready")
+                    dpg.configure_item(rs.status_tag, color=COL_GREEN)
+                    # Show preview window
+                    repo_key = str(rs.path)
+                    win_tag = dpg.generate_uuid()
+                    with dpg.window(
+                        label=f"Incoming changes — {rs.name}",
+                        tag=win_tag,
+                        width=620, height=420,
+                        no_collapse=True,
+                        on_close=lambda s, a, u=win_tag: (
+                            dpg.delete_item(u) if dpg.does_item_exist(u) else None
+                        ),
+                    ):
+                        if commits:
+                            dpg.add_text("Commits:", color=COL_ACCENT)
+                            dpg.add_input_text(
+                                default_value=commits,
+                                multiline=True, readonly=True,
+                                width=-1, height=140,
+                            )
+                            dpg.add_spacer(height=6)
+                        if diffstat:
+                            dpg.add_text("Files changed:", color=COL_ACCENT)
+                            dpg.add_input_text(
+                                default_value=diffstat,
+                                multiline=True, readonly=True,
+                                width=-1, height=140,
+                            )
+                            dpg.add_spacer(height=6)
+                        with dpg.group(horizontal=True):
+                            pull_btn = dpg.add_button(
+                                label="Pull Now",
+                                callback=cb_confirm_pull,
+                                user_data=(repo_key, win_tag),
+                            )
+                            dpg.bind_item_theme(pull_btn, pull_btn_theme)
+                            dpg.add_button(
+                                label="Cancel",
+                                callback=cb_close_preview,
+                                user_data=win_tag,
+                            )
 
         elif kind == "pull_result":
             _, repo_name, ok, detail = msg

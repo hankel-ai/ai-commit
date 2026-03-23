@@ -144,6 +144,38 @@ def get_sync_status(cwd):
         return 0, 0
 
 
+def get_incoming_changes(cwd):
+    """Return a summary of commits that a pull would bring in.
+
+    Assumes fetch has already been done (get_sync_status does this).
+    Returns (commits_text, diffstat_text) where each is a string.
+    commits_text has one line per incoming commit.
+    diffstat_text is the --stat output of the diff.
+    Returns ("", "") if there is nothing incoming or no upstream.
+    """
+    # Find upstream
+    rc, upstream, _ = run_git(
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd=cwd
+    )
+    if rc != 0 or not upstream.strip():
+        return "", ""
+    upstream = upstream.strip()
+
+    # Incoming commits: HEAD..upstream
+    rc, commits_out, _ = run_git(
+        ["log", "--oneline", "--no-decorate", f"HEAD..{upstream}"], cwd=cwd
+    )
+    commits_text = commits_out.strip() if rc == 0 else ""
+
+    # Diffstat: what files would change
+    rc, stat_out, _ = run_git(
+        ["diff", "--stat", f"HEAD...{upstream}"], cwd=cwd
+    )
+    diffstat_text = stat_out.strip() if rc == 0 else ""
+
+    return commits_text, diffstat_text
+
+
 def do_pull(cwd):
     """Run git pull. Returns (success: bool, detail: str)."""
     rc, stdout, stderr = run_git(["pull"], cwd=cwd)
