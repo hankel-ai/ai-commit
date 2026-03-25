@@ -44,12 +44,34 @@ def _maybe_detach():
 
 _maybe_detach()
 
+# ---------------------------------------------------------------------------
+# Auto-install missing dependencies from requirements.txt
+# ---------------------------------------------------------------------------
+
+def _ensure_dependencies():
+    """Check for required packages and pip install them if missing."""
+    required = {"dearpygui": "dearpygui", "pystray": "pystray", "PIL": "Pillow"}
+    missing = []
+    for import_name, pip_name in required.items():
+        try:
+            __import__(import_name)
+        except ImportError:
+            missing.append(pip_name)
+    if missing:
+        print(f"Installing missing dependencies: {', '.join(missing)}")
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--quiet"] + missing,
+        )
+
+_ensure_dependencies()
+
 import dearpygui.dearpygui as dpg
 
 import webbrowser
 
 from ai_commit_core import (
     STATUS_LABELS,
+    KiroCliError,
     OllamaError,
     default_config,
     discover_repos,
@@ -203,7 +225,8 @@ class AppState:
     poll_interval: int = 30
     auto_generate: bool = False
     always_on_top: bool = False
-    model: str = "qwen3-coder:480b-cloud"
+    model: str = "claude-haiku-4.5"
+    provider: str = "kiro"
     ollama_url: str = "http://localhost:11434"
     last_poll: float = 0.0
 
@@ -232,7 +255,7 @@ COL_WHITE = (220, 220, 225)
 _SETTINGS_FILE = Path(__file__).resolve().parent / "ai-commit-gui-settings.json"
 _LOCK_FILE = Path(__file__).resolve().parent / ".ai-commit-gui.lock"
 _ICON_FILE = Path(__file__).resolve().parent / "ai-commit-icon.ico"
-_DEFAULT_MODEL = "qwen3-coder:480b-cloud"
+_DEFAULT_MODEL = "claude-haiku-4.5"
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +283,7 @@ def _save_settings():
             "always_on_top": app.always_on_top,
             "poll_interval": app.poll_interval,
             "model": app.model,
+            "provider": app.provider,
             "watched_folders": [str(f) for f in app.watched_folders],
         }
         _SETTINGS_FILE.write_text(json.dumps(data))
@@ -512,10 +536,10 @@ def bg_generate_message(repo_name):
         if not diff.strip():
             ui_queue.put(("gen_result", repo_name, "", "No diff content available."))
             return
-        config = {"model": app.model, "url": app.ollama_url}
+        config = {"provider": app.provider, "model": app.model, "url": app.ollama_url}
         msg = generate_message(diff, config)
         ui_queue.put(("gen_result", repo_name, msg, ""))
-    except OllamaError as exc:
+    except (OllamaError, KiroCliError) as exc:
         ui_queue.put(("gen_result", repo_name, "", str(exc)))
     except Exception as exc:
         ui_queue.put(("gen_result", repo_name, "", f"Unexpected error: {exc}"))
@@ -817,7 +841,13 @@ def cb_model_changed(sender, app_data):
 
 def cb_model_reset(sender, app_data):
     app.model = _DEFAULT_MODEL
+    app.provider = "kiro"
     dpg.set_value("model_input", _DEFAULT_MODEL)
+    dpg.set_value("provider_combo", "kiro")
+
+
+def cb_provider_changed(sender, app_data):
+    app.provider = dpg.get_value(sender)
 
 
 # ---------------------------------------------------------------------------
@@ -1329,10 +1359,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description="AI Commit Monitor GUI")
     parser.add_argument("folder", nargs="*",
                         help="Folder(s) containing git repos to monitor")
-    parser.add_argument("--model", default=os.environ.get("AI_COMMIT_MODEL", "qwen3-coder:480b-cloud"),
-                        help="Ollama model name")
+    parser.add_argument("--provider", default=os.environ.get("AI_COMMIT_PROVIDER", "kiro"),
+                        choices=["kiro", "ollama"],
+                        help="AI provider (default: kiro)")
+    parser.add_argument("--model", default=os.environ.get("AI_COMMIT_MODEL", "claude-haiku-4.5"),
+                        help="Model name (default: claude-haiku-4.5)")
     parser.add_argument("--url", default=os.environ.get("AI_COMMIT_URL", "http://localhost:11434"),
-                        help="Ollama base URL")
+                        help="Ollama base URL (only used with --provider ollama)")
     parser.add_argument("--poll", type=int, default=30,
                         help="Poll interval in seconds (default: 30)")
     parser.add_argument("--topmost", action="store_true",
@@ -1373,6 +1406,7 @@ def main():
     _acquire_instance_lock()
     args = parse_args()
     app.model = args.model
+    app.provider = args.provider
     app.ollama_url = args.url
     folders_from_cli = bool(args.folder)
 
@@ -1390,6 +1424,8 @@ def main():
         app.poll_interval = saved.get("poll_interval", 30)
         if "model" in saved:
             app.model = saved["model"]
+        if "provider" in saved:
+            app.provider = saved["provider"]
         if not folders_from_cli:
             # Support new list format and migrate old single-folder format
             saved_folders = saved.get("watched_folders", [])
@@ -1493,6 +1529,10 @@ def main():
         # Model bar at bottom
         dpg.add_separator()
         with dpg.group(horizontal=True):
+            dpg.add_text("Provider:", color=COL_DIM)
+            dpg.add_combo(["kiro", "ollama"], tag="provider_combo",
+                          default_value=app.provider, width=80,
+                          callback=cb_provider_changed)
             dpg.add_text("Model:", color=COL_DIM)
             dpg.add_input_text(tag="model_input", default_value=app.model,
                                width=-60, callback=cb_model_changed,

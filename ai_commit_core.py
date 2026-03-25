@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import subprocess
 import urllib.error
 import urllib.request
@@ -263,8 +264,91 @@ def generate_message_ollama(diff, model, base_url):
         raise OllamaError(f"Unexpected response from Ollama: {exc}") from exc
 
 
+class KiroCliError(Exception):
+    """Raised when kiro-cli call fails."""
+    pass
+
+
+def generate_message_kiro(diff, model):
+    """Call kiro-cli via WSL and return the generated commit message.
+
+    Writes the prompt to a temp file and pipes it via stdin to kiro-cli
+    to avoid shell escaping and argument-length issues.
+    Raises KiroCliError on any failure.
+    """
+    import tempfile
+
+    prompt = SYSTEM_PROMPT + "\n\n" + diff
+
+    # Write prompt to a temp file on the Windows side
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8",
+    )
+    try:
+        tmp.write(prompt)
+        tmp.close()
+
+        # Convert Windows path to WSL path
+        win_path = tmp.name.replace("\\", "/")
+        if len(win_path) >= 2 and win_path[1] == ":":
+            wsl_path = f"/mnt/{win_path[0].lower()}{win_path[2:]}"
+        else:
+            wsl_path = win_path
+
+        # Pipe file content into kiro-cli stdin (avoids bash arg-length limits)
+        bash_cmd = (
+            f"cat '{wsl_path}' | "
+            f"kiro-cli chat --no-interactive --model {model} 2>/dev/null"
+        )
+        cmd = ["wsl", "--", "bash", "-lc", bash_cmd]
+
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=180,
+                **kwargs,
+            )
+        except FileNotFoundError:
+            raise KiroCliError(
+                "Could not find 'wsl' command.\n"
+                "Ensure WSL is installed and kiro-cli is available inside it."
+            )
+        except subprocess.TimeoutExpired:
+            raise KiroCliError("kiro-cli timed out after 180 seconds.")
+    finally:
+        os.unlink(tmp.name)
+
+    if result.returncode != 0:
+        err = result.stderr.strip() or result.stdout.strip()
+        raise KiroCliError(f"kiro-cli exited with code {result.returncode}:\n{err}")
+
+    content = result.stdout.strip()
+    if not content:
+        raise KiroCliError("kiro-cli returned empty output.")
+    # Strip ANSI escape codes from kiro-cli's colored output
+    content = re.sub(r"\x1b\[[0-9;]*m", "", content)
+    # Strip the leading "> " prefix kiro-cli adds to responses
+    lines = content.splitlines()
+    cleaned = []
+    for line in lines:
+        line = re.sub(r"^>\s?", "", line)
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
+
+
 def generate_message(diff, config):
-    """Dispatch to the configured AI provider (only Ollama for now)."""
+    """Dispatch to the configured AI provider."""
+    provider = config.get("provider", "ollama")
+    if provider == "kiro":
+        return generate_message_kiro(diff, config["model"])
     return generate_message_ollama(diff, config["model"], config["url"])
 
 
@@ -326,6 +410,7 @@ def discover_repos(folder):
 def default_config():
     """Return default config dict respecting env vars."""
     return {
-        "model": os.environ.get("AI_COMMIT_MODEL", "qwen3-coder:480b-cloud"),
+        "provider": os.environ.get("AI_COMMIT_PROVIDER", "kiro"),
+        "model": os.environ.get("AI_COMMIT_MODEL", "claude-haiku-4.5"),
         "url": os.environ.get("AI_COMMIT_URL", "http://localhost:11434"),
     }

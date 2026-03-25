@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ai_commit_core import (
     STATUS_LABELS,
+    KiroCliError,
     OllamaError,
     do_commit_and_push,
     generate_message,
@@ -68,19 +69,24 @@ def prompt_user(message):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Generate AI-powered git commit messages using a local Ollama LLM.",
+        description="Generate AI-powered git commit messages using Kiro CLI or Ollama.",
     )
     parser.add_argument(
         "folder", nargs="?", default=".",
         help="Path to the git repository (default: current directory)",
     )
     parser.add_argument(
-        "--model", default=os.environ.get("AI_COMMIT_MODEL", "qwen3-coder:480b-cloud"),
-        help="Ollama model name (default: qwen3-coder:480b-cloud, env: AI_COMMIT_MODEL)",
+        "--provider", default=os.environ.get("AI_COMMIT_PROVIDER", "kiro"),
+        choices=["kiro", "ollama"],
+        help="AI provider (default: kiro, env: AI_COMMIT_PROVIDER)",
+    )
+    parser.add_argument(
+        "--model", default=os.environ.get("AI_COMMIT_MODEL", "claude-haiku-4.5"),
+        help="Model name (default: claude-haiku-4.5, env: AI_COMMIT_MODEL)",
     )
     parser.add_argument(
         "--url", default=os.environ.get("AI_COMMIT_URL", "http://localhost:11434"),
-        help="Ollama base URL (default: http://localhost:11434, env: AI_COMMIT_URL)",
+        help="Ollama base URL (only used with --provider ollama, env: AI_COMMIT_URL)",
     )
     parser.add_argument(
         "--test", action="store_true",
@@ -96,7 +102,7 @@ def parse_args():
 def main():
     args = parse_args()
     target = Path(args.folder).resolve()
-    config = {"model": args.model, "url": args.url}
+    config = {"provider": args.provider, "model": args.model, "url": args.url}
     test_mode = args.test
 
     # Validate target
@@ -130,7 +136,7 @@ def main():
     print(f"Generating commit message with {config['model']}...")
     try:
         message = generate_message(diff, config)
-    except OllamaError as exc:
+    except (OllamaError, KiroCliError) as exc:
         print(f"\nError: {exc}")
         sys.exit(1)
 
@@ -139,7 +145,7 @@ def main():
         print("TEST MODE \u2014 generated commit message:\n")
         print(message)
         print("\n" + "\u2500" * 60)
-        print("Ollama is reachable and responding. No changes were committed.")
+        print("AI provider is reachable and responding. No changes were committed.")
         sys.exit(0)
 
     # Interaction loop
@@ -155,7 +161,7 @@ def main():
             print(f"\nRegenerating with {config['model']}...")
             try:
                 message = generate_message(diff, config)
-            except OllamaError as exc:
+            except (OllamaError, KiroCliError) as exc:
                 print(f"\nError: {exc}")
                 sys.exit(1)
             continue
