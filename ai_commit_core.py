@@ -410,7 +410,7 @@ def discover_repos(folder):
 def default_config():
     """Return default config dict respecting env vars."""
     return {
-        "provider": os.environ.get("AI_COMMIT_PROVIDER", "kiro"),
-        "model": os.environ.get("AI_COMMIT_MODEL", "claude-haiku-4.5"),
+        "provider": os.environ.get("AI_COMMIT_PROVIDER", "ollama"),
+        "model": os.environ.get("AI_COMMIT_MODEL", "qwen3-coder:480b-cloud"),
         "url": os.environ.get("AI_COMMIT_URL", "http://localhost:11434"),
     }

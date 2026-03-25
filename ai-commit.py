@@ -76,13 +76,13 @@ def parse_args():
         help="Path to the git repository (default: current directory)",
     )
     parser.add_argument(
-        "--provider", default=os.environ.get("AI_COMMIT_PROVIDER", "kiro"),
+        "--provider", default=os.environ.get("AI_COMMIT_PROVIDER", "ollama"),
         choices=["kiro", "ollama"],
-        help="AI provider (default: kiro, env: AI_COMMIT_PROVIDER)",
+        help="AI provider (default: ollama, env: AI_COMMIT_PROVIDER)",
     )
     parser.add_argument(
-        "--model", default=os.environ.get("AI_COMMIT_MODEL", "claude-haiku-4.5"),
-        help="Model name (default: claude-haiku-4.5, env: AI_COMMIT_MODEL)",
+        "--model", default=os.environ.get("AI_COMMIT_MODEL", "qwen3-coder:480b-cloud"),
+        help="Model name (default: qwen3-coder:480b-cloud, env: AI_COMMIT_MODEL)",
     )
     parser.add_argument(
         "--url", default=os.environ.get("AI_COMMIT_URL", "http://localhost:11434"),

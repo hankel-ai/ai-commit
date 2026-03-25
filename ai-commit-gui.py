@@ -225,8 +225,8 @@ class AppState:
     poll_interval: int = 30
     auto_generate: bool = False
     always_on_top: bool = False
-    model: str = "claude-haiku-4.5"
-    provider: str = "kiro"
+    model: str = "qwen3-coder:480b-cloud"
+    provider: str = "ollama"
     ollama_url: str = "http://localhost:11434"
     last_poll: float = 0.0
 
@@ -255,7 +255,7 @@ COL_WHITE = (220, 220, 225)
 _SETTINGS_FILE = Path(__file__).resolve().parent / "ai-commit-gui-settings.json"
 _LOCK_FILE = Path(__file__).resolve().parent / ".ai-commit-gui.lock"
 _ICON_FILE = Path(__file__).resolve().parent / "ai-commit-icon.ico"
-_DEFAULT_MODEL = "claude-haiku-4.5"
+_DEFAULT_MODEL = "qwen3-coder:480b-cloud"
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +524,27 @@ def bg_poll_repos():
                 "behind": behind,
             }
     ui_queue.put(("poll_result", results))
+
+
+def bg_refresh_single_repo(repo_name):
+    """Re-poll a single repo and post its updated info to ui_queue."""
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    rp = rs.path
+    entries = get_status(rp)
+    last_msg, last_date = get_last_commit(rp)
+    remote_url = rs.remote_url or get_remote_url(rp)
+    ahead, behind = get_sync_status(rp)
+    ui_queue.put(("single_repo_refresh", repo_name, {
+        "path": rp,
+        "entries": entries,
+        "remote_url": remote_url,
+        "last_commit_msg": last_msg,
+        "last_commit_date": last_date,
+        "ahead": ahead,
+        "behind": behind,
+    }))
 
 
 def bg_generate_message(repo_name):
@@ -841,9 +862,9 @@ def cb_model_changed(sender, app_data):
 
 def cb_model_reset(sender, app_data):
     app.model = _DEFAULT_MODEL
-    app.provider = "kiro"
+    app.provider = "ollama"
     dpg.set_value("model_input", _DEFAULT_MODEL)
-    dpg.set_value("provider_combo", "kiro")
+    dpg.set_value("provider_combo", "ollama")
 
 
 def cb_provider_changed(sender, app_data):
@@ -1267,11 +1288,50 @@ def process_queue():
                     dpg.set_value(rs.input_tag, "")
                 dpg.set_value(rs.status_tag, "Committed & pushed!")
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
-                executor.submit(bg_poll_repos)
+                executor.submit(bg_refresh_single_repo, repo_name)
             else:
                 rs.gen_status = GenStatus.ERROR
                 rs.error_message = detail
                 update_repo_status(rs)
+
+        elif kind == "single_repo_refresh":
+            _, repo_name, info = msg
+            rs = app.repos.get(repo_name)
+            if not rs:
+                continue
+            # Update repo state with fresh data
+            rs.entries = info["entries"]
+            rs.last_commit_msg = info.get("last_commit_msg", "")
+            rs.last_commit_date = info.get("last_commit_date", "")
+            rs.ahead = info.get("ahead", 0)
+            rs.behind = info.get("behind", 0)
+            rs.commit_message = ""
+            rs.gen_status = GenStatus.IDLE
+            rs.error_message = ""
+            # Update header label
+            if rs.header_tag and dpg.does_item_exist(rs.header_tag):
+                label = _repo_base_label(rs)
+                if rs.last_commit_date:
+                    label += f"  [{rs.last_commit_date}]"
+                dpg.configure_item(rs.header_tag, label=label)
+            # Clear file list and show updated entries
+            if rs.files_group_tag and dpg.does_item_exist(rs.files_group_tag):
+                dpg.delete_item(rs.files_group_tag, children_only=True)
+                if rs.entries:
+                    for code, filepath in rs.entries:
+                        lbl = STATUS_LABELS.get(code, code)
+                        color = COL_GREEN if code in ("A", "AM", "??") else COL_YELLOW if code in ("M", "MM") else COL_RED if code == "D" else COL_DIM
+                        with dpg.group(horizontal=True, parent=rs.files_group_tag):
+                            dpg.add_text(f"  {lbl:>10}", color=color)
+                            dpg.add_text(f"  {filepath}")
+                else:
+                    dpg.add_text("  No changes", color=COL_DIM, parent=rs.files_group_tag)
+            # Update input and status
+            if rs.input_tag and dpg.does_item_exist(rs.input_tag):
+                dpg.set_value(rs.input_tag, "")
+            if rs.status_tag and dpg.does_item_exist(rs.status_tag):
+                dpg.set_value(rs.status_tag, "Committed & pushed!")
+                dpg.configure_item(rs.status_tag, color=COL_GREEN)
 
         elif kind == "preview_pull_result":
             _, repo_name, commits, diffstat = msg
@@ -1359,11 +1419,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="AI Commit Monitor GUI")
     parser.add_argument("folder", nargs="*",
                         help="Folder(s) containing git repos to monitor")
-    parser.add_argument("--provider", default=os.environ.get("AI_COMMIT_PROVIDER", "kiro"),
+    parser.add_argument("--provider", default=os.environ.get("AI_COMMIT_PROVIDER", "ollama"),
                         choices=["kiro", "ollama"],
-                        help="AI provider (default: kiro)")
-    parser.add_argument("--model", default=os.environ.get("AI_COMMIT_MODEL", "claude-haiku-4.5"),
-                        help="Model name (default: claude-haiku-4.5)")
+                        help="AI provider (default: ollama)")
+    parser.add_argument("--model", default=os.environ.get("AI_COMMIT_MODEL", "qwen3-coder:480b-cloud"),
+                        help="Model name (default: qwen3-coder:480b-cloud)")
     parser.add_argument("--url", default=os.environ.get("AI_COMMIT_URL", "http://localhost:11434"),
                         help="Ollama base URL (only used with --provider ollama)")
     parser.add_argument("--poll", type=int, default=30,
