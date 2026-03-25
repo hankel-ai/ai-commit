@@ -1296,42 +1296,20 @@ def process_queue():
 
         elif kind == "single_repo_refresh":
             _, repo_name, info = msg
-            rs = app.repos.get(repo_name)
-            if not rs:
-                continue
-            # Update repo state with fresh data
-            rs.entries = info["entries"]
-            rs.last_commit_msg = info.get("last_commit_msg", "")
-            rs.last_commit_date = info.get("last_commit_date", "")
-            rs.ahead = info.get("ahead", 0)
-            rs.behind = info.get("behind", 0)
-            rs.commit_message = ""
-            rs.gen_status = GenStatus.IDLE
-            rs.error_message = ""
-            # Update header label
-            if rs.header_tag and dpg.does_item_exist(rs.header_tag):
-                label = _repo_base_label(rs)
-                if rs.last_commit_date:
-                    label += f"  [{rs.last_commit_date}]"
-                dpg.configure_item(rs.header_tag, label=label)
-            # Clear file list and show updated entries
-            if rs.files_group_tag and dpg.does_item_exist(rs.files_group_tag):
-                dpg.delete_item(rs.files_group_tag, children_only=True)
-                if rs.entries:
-                    for code, filepath in rs.entries:
-                        lbl = STATUS_LABELS.get(code, code)
-                        color = COL_GREEN if code in ("A", "AM", "??") else COL_YELLOW if code in ("M", "MM") else COL_RED if code == "D" else COL_DIM
-                        with dpg.group(horizontal=True, parent=rs.files_group_tag):
-                            dpg.add_text(f"  {lbl:>10}", color=color)
-                            dpg.add_text(f"  {filepath}")
-                else:
-                    dpg.add_text("  No changes", color=COL_DIM, parent=rs.files_group_tag)
-            # Update input and status
-            if rs.input_tag and dpg.does_item_exist(rs.input_tag):
-                dpg.set_value(rs.input_tag, "")
-            if rs.status_tag and dpg.does_item_exist(rs.status_tag):
-                dpg.set_value(rs.status_tag, "Committed & pushed!")
-                dpg.configure_item(rs.status_tag, color=COL_GREEN)
+            # Merge fresh data for this repo into current state and rebuild
+            merged = {}
+            for name, rs in app.repos.items():
+                merged[name] = {
+                    "path": rs.path,
+                    "entries": rs.entries,
+                    "remote_url": rs.remote_url,
+                    "last_commit_msg": rs.last_commit_msg,
+                    "last_commit_date": rs.last_commit_date,
+                    "ahead": rs.ahead,
+                    "behind": rs.behind,
+                }
+            merged[repo_name] = info
+            rebuild_repos_ui(merged)
 
         elif kind == "preview_pull_result":
             _, repo_name, commits, diffstat = msg
