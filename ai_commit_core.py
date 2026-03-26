@@ -119,13 +119,15 @@ def get_last_commit(cwd):
     return subject, short_date
 
 
-def get_sync_status(cwd):
-    """Fetch from origin and return (ahead, behind) commit counts vs tracking branch.
+def get_sync_status(cwd, fetch=True):
+    """Return (ahead, behind) commit counts vs tracking branch.
 
+    When *fetch* is True (default), fetches from origin first.
     Returns (0, 0) if there is no remote or no tracking branch.
     """
-    # Fetch silently — ignore errors (offline, no remote, etc.)
-    run_git(["fetch", "--quiet"], cwd=cwd)
+    if fetch:
+        # Fetch silently — ignore errors (offline, no remote, etc.)
+        run_git(["fetch", "--quiet"], cwd=cwd)
 
     # Find the upstream tracking branch
     rc, upstream, _ = run_git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd=cwd)

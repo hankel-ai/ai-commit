@@ -508,13 +508,14 @@ def bg_poll_repos():
             repo_key = str(rp)
             entries = get_status(rp)
             last_msg, last_date = get_last_commit(rp)
-            # Cache remote URL: only fetch for new repos
+            # Only fetch from remote for newly discovered repos
             existing = app.repos.get(repo_key)
+            is_new = existing is None
             if existing and existing.remote_url:
                 remote_url = existing.remote_url
             else:
                 remote_url = get_remote_url(rp)
-            ahead, behind = get_sync_status(rp)
+            ahead, behind = get_sync_status(rp, fetch=is_new)
             results[repo_key] = {
                 "path": rp,
                 "entries": entries,
