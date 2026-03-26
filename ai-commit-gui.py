@@ -7,6 +7,7 @@ import os
 import queue
 import subprocess
 import sys
+import tempfile
 import textwrap
 import threading
 import time
@@ -253,7 +254,7 @@ COL_DIM = (120, 120, 130)
 COL_WHITE = (220, 220, 225)
 
 _SETTINGS_FILE = Path(__file__).resolve().parent / "ai-commit-gui-settings.json"
-_LOCK_FILE = Path(__file__).resolve().parent / ".ai-commit-gui.lock"
+_LOCK_FILE = Path(tempfile.gettempdir()) / ".ai-commit-gui.lock"
 _ICON_FILE = Path(__file__).resolve().parent / "ai-commit-icon.ico"
 _DEFAULT_MODEL = "qwen3-coder:480b-cloud"
 
