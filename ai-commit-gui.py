@@ -85,6 +85,7 @@ from ai_commit_core import (
     get_remote_url,
     get_status,
     get_sync_status,
+    run_git,
 )
 
 # ---------------------------------------------------------------------------
@@ -604,6 +605,66 @@ def bg_commit_and_push(repo_name, message):
         ui_queue.put(("commit_result", repo_name, False, str(exc)))
 
 
+def bg_refresh_then_generate(repo_name):
+    """Refresh repo status then generate a commit message.
+
+    Posts a single_repo_refresh first, then proceeds to generate.
+    """
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    rp = rs.path
+    entries = get_status(rp)
+    last_msg, last_date = get_last_commit(rp)
+    remote_url = rs.remote_url or get_remote_url(rp)
+    ahead, behind = get_sync_status(rp, fetch=False)
+    ui_queue.put(("refresh_then_generate", repo_name, {
+        "path": rp,
+        "entries": entries,
+        "remote_url": remote_url,
+        "last_commit_msg": last_msg,
+        "last_commit_date": last_date,
+        "ahead": ahead,
+        "behind": behind,
+    }))
+
+
+def bg_create_remote(repo_name):
+    """Create a private GitHub repo and push. Posts result to ui_queue."""
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    try:
+        cwd = str(rs.path)
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        result = subprocess.run(
+            ["gh", "repo", "create", "--private", "--source", cwd, "--push"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+            **kwargs,
+        )
+        if result.returncode != 0:
+            err = result.stderr.strip() or result.stdout.strip()
+            ui_queue.put(("create_remote_result", repo_name, False, err))
+        else:
+            remote_url = get_remote_url(cwd)
+            ui_queue.put(("create_remote_result", repo_name, True, remote_url))
+    except FileNotFoundError:
+        ui_queue.put(("create_remote_result", repo_name, False,
+                       "gh CLI not found. Install from https://cli.github.com"))
+    except subprocess.TimeoutExpired:
+        ui_queue.put(("create_remote_result", repo_name, False,
+                       "gh repo create timed out after 60 seconds."))
+    except Exception as exc:
+        ui_queue.put(("create_remote_result", repo_name, False, str(exc)))
+
+
 # ---------------------------------------------------------------------------
 # UI callbacks
 # ---------------------------------------------------------------------------
@@ -699,12 +760,24 @@ def cb_generate(sender, app_data, user_data):
     if rs.input_tag and dpg.does_item_exist(rs.input_tag):
         dpg.set_value(rs.input_tag, "")
     update_repo_status(rs)
-    executor.submit(bg_generate_message, repo_name)
+    # Refresh repo status first, then generate (handled in queue processor)
+    executor.submit(bg_refresh_then_generate, repo_name)
 
 
 def cb_open_repo_url(sender, app_data, user_data):
     if user_data:
         webbrowser.open(user_data)
+
+
+def cb_create_remote(sender, app_data, user_data):
+    """Create a private GitHub repo for this project and push."""
+    repo_key = user_data
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    dpg.set_value(rs.status_tag, "Creating GitHub repo...")
+    dpg.configure_item(rs.status_tag, color=COL_YELLOW)
+    executor.submit(bg_create_remote, repo_key)
 
 
 def cb_open_folder(sender, app_data, user_data):
@@ -1055,6 +1128,9 @@ def build_repo_section(rs, parent, label_width=0):
         if rs.remote_url:
             btn = dpg.add_button(label="GitHub", callback=cb_open_repo_url, user_data=rs.remote_url)
             dpg.bind_item_theme(btn, link_btn_theme)
+        else:
+            btn = dpg.add_button(label="Create-Remote", callback=cb_create_remote, user_data=str(rs.path))
+            dpg.bind_item_theme(btn, link_btn_theme)
         if rs.last_commit_msg:
             commit_label = rs.last_commit_msg
             if len(commit_label) > 50:
@@ -1312,6 +1388,51 @@ def process_queue():
                 }
             merged[repo_name] = info
             rebuild_repos_ui(merged)
+
+        elif kind == "refresh_then_generate":
+            _, repo_name, info = msg
+            # Merge fresh data and rebuild UI
+            merged = {}
+            for name, rs in app.repos.items():
+                merged[name] = {
+                    "path": rs.path,
+                    "entries": rs.entries,
+                    "remote_url": rs.remote_url,
+                    "last_commit_msg": rs.last_commit_msg,
+                    "last_commit_date": rs.last_commit_date,
+                    "ahead": rs.ahead,
+                    "behind": rs.behind,
+                }
+            merged[repo_name] = info
+            rebuild_repos_ui(merged)
+            # Now kick off generation if there are still changes
+            rs = app.repos.get(repo_name)
+            if rs and rs.entries:
+                rs.gen_status = GenStatus.GENERATING
+                rs.error_message = ""
+                rs.commit_message = ""
+                if rs.input_tag and dpg.does_item_exist(rs.input_tag):
+                    dpg.set_value(rs.input_tag, "")
+                update_repo_status(rs)
+                executor.submit(bg_generate_message, repo_name)
+            elif rs:
+                rs.gen_status = GenStatus.IDLE
+                update_repo_status(rs)
+
+        elif kind == "create_remote_result":
+            _, repo_name, ok, detail = msg
+            rs = app.repos.get(repo_name)
+            if not rs:
+                continue
+            if ok:
+                rs.remote_url = detail
+                dpg.set_value(rs.status_tag, "GitHub repo created!")
+                dpg.configure_item(rs.status_tag, color=COL_GREEN)
+                # Rebuild to show GitHub button instead of Create Remote
+                executor.submit(bg_refresh_single_repo, repo_name)
+            else:
+                dpg.set_value(rs.status_tag, f"Create failed: {detail}")
+                dpg.configure_item(rs.status_tag, color=COL_RED)
 
         elif kind == "preview_pull_result":
             _, repo_name, commits, diffstat = msg
