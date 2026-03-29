@@ -80,6 +80,7 @@ from ai_commit_core import (
     do_pull,
     generate_message,
     get_diff,
+    get_git_user,
     get_incoming_changes,
     get_last_commit,
     get_remote_url,
@@ -207,6 +208,7 @@ class RepoState:
     gen_status: GenStatus = GenStatus.IDLE
     error_message: str = ""
     remote_url: str = ""
+    git_user: str = ""
     last_commit_msg: str = ""
     last_commit_date: str = ""
     ahead: int = 0
@@ -516,11 +518,16 @@ def bg_poll_repos():
                 remote_url = existing.remote_url
             else:
                 remote_url = get_remote_url(rp)
+            if existing and existing.git_user:
+                git_user = existing.git_user
+            else:
+                git_user = get_git_user(rp)
             ahead, behind = get_sync_status(rp, fetch=is_new)
             results[repo_key] = {
                 "path": rp,
                 "entries": entries,
                 "remote_url": remote_url,
+                "git_user": git_user,
                 "last_commit_msg": last_msg,
                 "last_commit_date": last_date,
                 "ahead": ahead,
@@ -538,11 +545,13 @@ def bg_refresh_single_repo(repo_name):
     entries = get_status(rp)
     last_msg, last_date = get_last_commit(rp)
     remote_url = rs.remote_url or get_remote_url(rp)
+    git_user = rs.git_user or get_git_user(rp)
     ahead, behind = get_sync_status(rp)
     ui_queue.put(("single_repo_refresh", repo_name, {
         "path": rp,
         "entries": entries,
         "remote_url": remote_url,
+        "git_user": git_user,
         "last_commit_msg": last_msg,
         "last_commit_date": last_date,
         "ahead": ahead,
@@ -617,11 +626,13 @@ def bg_refresh_then_generate(repo_name):
     entries = get_status(rp)
     last_msg, last_date = get_last_commit(rp)
     remote_url = rs.remote_url or get_remote_url(rp)
+    git_user = rs.git_user or get_git_user(rp)
     ahead, behind = get_sync_status(rp, fetch=False)
     ui_queue.put(("refresh_then_generate", repo_name, {
         "path": rp,
         "entries": entries,
         "remote_url": remote_url,
+        "git_user": git_user,
         "last_commit_msg": last_msg,
         "last_commit_date": last_date,
         "ahead": ahead,
@@ -1085,9 +1096,14 @@ def build_repo_section(rs, parent, label_width=0):
     """Build the UI section for a single repo inside *parent*."""
     change_count = len(rs.entries)
     label = _repo_base_label(rs)
-    if rs.last_commit_date:
+    if rs.last_commit_date or rs.git_user:
         pad = max(0, label_width - len(label))
-        label += " " * pad + f"  [{rs.last_commit_date}]"
+        meta_parts = []
+        if rs.last_commit_date:
+            meta_parts.append(rs.last_commit_date)
+        if rs.git_user:
+            meta_parts.append(rs.git_user)
+        label += " " * pad + f"  [{' | '.join(meta_parts)}]"
 
     rs.header_tag = dpg.add_collapsing_header(
         label=label,
@@ -1289,6 +1305,7 @@ def rebuild_repos_ui(results):
             gen_status=gen,
             error_message=err,
             remote_url=info.get("remote_url", ""),
+            git_user=info.get("git_user", ""),
             last_commit_msg=info.get("last_commit_msg", ""),
             last_commit_date=info.get("last_commit_date", ""),
             ahead=info.get("ahead", 0),
@@ -1381,6 +1398,7 @@ def process_queue():
                     "path": rs.path,
                     "entries": rs.entries,
                     "remote_url": rs.remote_url,
+                    "git_user": rs.git_user,
                     "last_commit_msg": rs.last_commit_msg,
                     "last_commit_date": rs.last_commit_date,
                     "ahead": rs.ahead,
@@ -1398,6 +1416,7 @@ def process_queue():
                     "path": rs.path,
                     "entries": rs.entries,
                     "remote_url": rs.remote_url,
+                    "git_user": rs.git_user,
                     "last_commit_msg": rs.last_commit_msg,
                     "last_commit_date": rs.last_commit_date,
                     "ahead": rs.ahead,

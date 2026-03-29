@@ -83,6 +83,17 @@ def get_status(cwd):
     return entries
 
 
+def get_git_user(cwd):
+    """Return 'Name <email>' for the git user configured in this repo."""
+    rc_n, name, _ = run_git(["config", "user.name"], cwd=cwd)
+    rc_e, email, _ = run_git(["config", "user.email"], cwd=cwd)
+    name = name.strip() if rc_n == 0 else ""
+    email = email.strip() if rc_e == 0 else ""
+    if name and email:
+        return f"{name} <{email}>"
+    return name or email or ""
+
+
 def get_remote_url(cwd):
     """Return the HTTPS URL for the repo's origin remote, or empty string."""
     rc, stdout, _ = run_git(["remote", "get-url", "origin"], cwd=cwd)
