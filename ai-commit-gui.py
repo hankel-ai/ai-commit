@@ -233,6 +233,7 @@ class AppState:
     provider: str = "ollama"
     ollama_url: str = "http://localhost:11434"
     last_poll: float = 0.0
+    paused: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +740,17 @@ def cb_browse(sender, app_data):
 
 def cb_refresh(sender, app_data):
     trigger_poll()
+
+
+def cb_pause(sender, app_data):
+    app.paused = not app.paused
+    if app.paused:
+        dpg.configure_item("pause_btn", label="Paused")
+        dpg.bind_item_theme("pause_btn", "pause_active_theme")
+    else:
+        dpg.configure_item("pause_btn", label="Pause")
+        dpg.bind_item_theme("pause_btn", 0)
+        trigger_poll()
 
 
 def cb_poll_changed(sender, app_data):
@@ -1662,6 +1674,14 @@ def main():
             dpg.add_theme_style(dpg.mvStyleVar_FramePadding, 2, 2)
             dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 2)
 
+    # Pause-active button theme (red background)
+    with dpg.theme(tag="pause_active_theme"):
+        with dpg.theme_component(dpg.mvButton):
+            dpg.add_theme_color(dpg.mvThemeCol_Button, (180, 40, 40))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (200, 60, 60))
+            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (220, 80, 80))
+            dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 255, 255))
+
     # Small remove-button theme (red text, no background)
     with dpg.theme() as remove_btn_theme:
         with dpg.theme_component(dpg.mvButton):
@@ -1681,6 +1701,7 @@ def main():
         with dpg.group(horizontal=True):
             dpg.add_button(label="Add Folder", callback=cb_browse)
             dpg.add_button(label="Refresh", callback=cb_refresh)
+            dpg.add_button(label="Pause", tag="pause_btn", callback=cb_pause)
             dpg.add_spacer(width=10)
             dpg.add_text("Poll:", color=COL_DIM)
             dpg.add_input_int(default_value=app.poll_interval, width=50,
@@ -1778,7 +1799,7 @@ def main():
             _hide_window()
 
         now = time.time()
-        if now - app.last_poll >= app.poll_interval:
+        if not app.paused and now - app.last_poll >= app.poll_interval:
             trigger_poll()
 
         dpg.render_dearpygui_frame()
