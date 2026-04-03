@@ -80,7 +80,10 @@ from ai_commit_core import (
     do_pull,
     generate_message,
     get_diff,
+    get_git_global_user,
     get_git_user,
+    get_git_user_local_override,
+    get_github_account,
     get_incoming_changes,
     get_last_commit,
     get_remote_url,
@@ -209,6 +212,9 @@ class RepoState:
     error_message: str = ""
     remote_url: str = ""
     git_user: str = ""
+    github_account: str = ""
+    local_name: str = ""
+    local_email: str = ""
     last_commit_msg: str = ""
     last_commit_date: str = ""
     ahead: int = 0
@@ -510,6 +516,8 @@ def bg_poll_repos():
         repo_paths = discover_repos(folder)
         for rp in repo_paths:
             repo_key = str(rp)
+            # Signal that this repo is being refreshed
+            ui_queue.put(("repo_loading", repo_key, rp.name))
             entries = get_status(rp)
             last_msg, last_date = get_last_commit(rp)
             # Only fetch from remote for newly discovered repos
@@ -523,12 +531,17 @@ def bg_poll_repos():
                 git_user = existing.git_user
             else:
                 git_user = get_git_user(rp)
+            github_account = get_github_account(remote_url)
+            local_name, local_email = get_git_user_local_override(rp)
             ahead, behind = get_sync_status(rp, fetch=is_new)
             results[repo_key] = {
                 "path": rp,
                 "entries": entries,
                 "remote_url": remote_url,
                 "git_user": git_user,
+                "github_account": github_account,
+                "local_name": local_name,
+                "local_email": local_email,
                 "last_commit_msg": last_msg,
                 "last_commit_date": last_date,
                 "ahead": ahead,
@@ -543,16 +556,22 @@ def bg_refresh_single_repo(repo_name):
     if not rs:
         return
     rp = rs.path
+    ui_queue.put(("repo_loading", repo_name, rp.name))
     entries = get_status(rp)
     last_msg, last_date = get_last_commit(rp)
     remote_url = rs.remote_url or get_remote_url(rp)
     git_user = rs.git_user or get_git_user(rp)
+    github_account = get_github_account(remote_url)
+    local_name, local_email = get_git_user_local_override(rp)
     ahead, behind = get_sync_status(rp)
     ui_queue.put(("single_repo_refresh", repo_name, {
         "path": rp,
         "entries": entries,
         "remote_url": remote_url,
         "git_user": git_user,
+        "github_account": github_account,
+        "local_name": local_name,
+        "local_email": local_email,
         "last_commit_msg": last_msg,
         "last_commit_date": last_date,
         "ahead": ahead,
@@ -1047,6 +1066,12 @@ def setup_tray():
 
 def trigger_poll():
     app.last_poll = time.time()
+    # Immediately mark all existing repos as loading in the UI
+    for rs in app.repos.values():
+        if rs.header_tag and dpg.does_item_exist(rs.header_tag):
+            old_label = dpg.get_item_label(rs.header_tag)
+            if not old_label.endswith(" ..."):
+                dpg.configure_item(rs.header_tag, label=old_label + "  ...")
     executor.submit(bg_poll_repos)
 
 
@@ -1108,13 +1133,13 @@ def build_repo_section(rs, parent, label_width=0):
     """Build the UI section for a single repo inside *parent*."""
     change_count = len(rs.entries)
     label = _repo_base_label(rs)
-    if rs.last_commit_date or rs.git_user:
+    if rs.last_commit_date or rs.github_account:
         pad = max(0, label_width - len(label))
         meta_parts = []
         if rs.last_commit_date:
             meta_parts.append(rs.last_commit_date)
-        if rs.git_user:
-            meta_parts.append(rs.git_user)
+        if rs.github_account:
+            meta_parts.append(rs.github_account)
         label += " " * pad + f"  [{' | '.join(meta_parts)}]"
 
     rs.header_tag = dpg.add_collapsing_header(
@@ -1122,6 +1147,17 @@ def build_repo_section(rs, parent, label_width=0):
         parent=parent,
         default_open=change_count > 0 or rs.behind > 0,
     )
+
+    # Show local git config overrides in red
+    if rs.local_name or rs.local_email:
+        override_parts = []
+        if rs.local_name:
+            override_parts.append(f"name: {rs.local_name}")
+        if rs.local_email:
+            override_parts.append(f"email: {rs.local_email}")
+        dpg.add_text(
+            f"  !! Local git config override: {', '.join(override_parts)}",
+            color=COL_RED, parent=rs.header_tag)
 
     # Sync warning banner — prominent when behind remote
     if rs.behind > 0 or rs.ahead > 0:
@@ -1318,6 +1354,9 @@ def rebuild_repos_ui(results):
             error_message=err,
             remote_url=info.get("remote_url", ""),
             git_user=info.get("git_user", ""),
+            github_account=info.get("github_account", ""),
+            local_name=info.get("local_name", ""),
+            local_email=info.get("local_email", ""),
             last_commit_msg=info.get("last_commit_msg", ""),
             last_commit_date=info.get("last_commit_date", ""),
             ahead=info.get("ahead", 0),
@@ -1401,6 +1440,21 @@ def process_queue():
                 rs.error_message = detail
                 update_repo_status(rs)
 
+        elif kind == "repo_loading":
+            _, repo_key, repo_display_name = msg
+            # Show a loading indicator for this repo if it already exists
+            rs = app.repos.get(repo_key)
+            if rs and rs.header_tag and dpg.does_item_exist(rs.header_tag):
+                old_label = dpg.get_item_label(rs.header_tag)
+                if not old_label.endswith(" ..."):
+                    dpg.configure_item(rs.header_tag, label=old_label + "  ...")
+            elif dpg.does_item_exist("repos_container"):
+                # New repo being discovered — show placeholder
+                dpg.add_text(
+                    f"  {repo_display_name}  ...",
+                    color=COL_DIM, parent="repos_container",
+                )
+
         elif kind == "single_repo_refresh":
             _, repo_name, info = msg
             # Merge fresh data for this repo into current state and rebuild
@@ -1411,6 +1465,9 @@ def process_queue():
                     "entries": rs.entries,
                     "remote_url": rs.remote_url,
                     "git_user": rs.git_user,
+                    "github_account": rs.github_account,
+                    "local_name": rs.local_name,
+                    "local_email": rs.local_email,
                     "last_commit_msg": rs.last_commit_msg,
                     "last_commit_date": rs.last_commit_date,
                     "ahead": rs.ahead,
@@ -1429,6 +1486,9 @@ def process_queue():
                     "entries": rs.entries,
                     "remote_url": rs.remote_url,
                     "git_user": rs.git_user,
+                    "github_account": rs.github_account,
+                    "local_name": rs.local_name,
+                    "local_email": rs.local_email,
                     "last_commit_msg": rs.last_commit_msg,
                     "last_commit_date": rs.last_commit_date,
                     "ahead": rs.ahead,
@@ -1708,6 +1768,10 @@ def main():
                               min_value=5, min_clamped=True, max_value=600, max_clamped=True,
                               callback=cb_poll_changed, step=0)
             dpg.add_text("s", color=COL_DIM)
+            dpg.add_spacer(width=10)
+            _gname, _gemail = get_git_global_user()
+            _global_label = f"{_gname} <{_gemail}>" if _gname and _gemail else _gname or _gemail or "not set"
+            dpg.add_text(f"Git: {_global_label}", color=COL_DIM)
 
         with dpg.group(horizontal=True):
             dpg.add_checkbox(label="Auto-generate", default_value=app.auto_generate,

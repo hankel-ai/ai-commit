@@ -27,6 +27,16 @@ Default model: `qwen3-coder:480b-cloud` (configurable via settings or `AI_COMMIT
 | `ai-commit-gui-settings.json` | Persisted GUI settings (window pos, provider, model, watched folders) |
 | `requirements.txt` | Python dependencies |
 
+## Deploy
+
+**After every code change, run `deploy.cmd` to copy to the production location:**
+
+```bash
+cmd.exe /c "cd /d C:\Users\admin\OneDrive\ClaudeCode\ai-commit && deploy.cmd"
+```
+
+This robocopy's the project to `%USERPROFILE%\OneDrive\Programs\ai-commit` (where the startup shortcut points). Always deploy after making changes.
+
 ## Run / Build
 
 ```bash

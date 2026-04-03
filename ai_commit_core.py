@@ -94,6 +94,56 @@ def get_git_user(cwd):
     return name or email or ""
 
 
+def get_git_user_local_override(cwd):
+    """Return (local_name, local_email) if the repo has local config overrides.
+
+    Uses ``--local`` so only values set in ``.git/config`` are returned.
+    Returns empty strings for values that are not locally overridden.
+    """
+    rc_n, name, _ = run_git(["config", "--local", "user.name"], cwd=cwd)
+    rc_e, email, _ = run_git(["config", "--local", "user.email"], cwd=cwd)
+    local_name = name.strip() if rc_n == 0 else ""
+    local_email = email.strip() if rc_e == 0 else ""
+    return local_name, local_email
+
+
+def get_git_global_user():
+    """Return (global_name, global_email) from ``git config --global``."""
+    rc_n, name, _ = run_git(["config", "--global", "user.name"], cwd=".")
+    rc_e, email, _ = run_git(["config", "--global", "user.email"], cwd=".")
+    global_name = name.strip() if rc_n == 0 else ""
+    global_email = email.strip() if rc_e == 0 else ""
+    return global_name, global_email
+
+
+def get_github_account(remote_url):
+    """Extract the GitHub owner/account name from a remote URL.
+
+    E.g. 'https://github.com/hankel-ai/repo.git' -> 'hankel-ai'
+    Also handles PAT-embedded URLs and SSH URLs.
+    """
+    if not remote_url:
+        return ""
+    url = remote_url.rstrip("/")
+    if url.endswith(".git"):
+        url = url[:-4]
+    # SSH: git@github.com:owner/repo
+    if ":" in url and url.startswith("git@"):
+        path = url.split(":", 1)[1]
+        parts = path.split("/")
+        return parts[0] if parts else ""
+    # HTTPS (possibly with PAT): https://[token@]github.com/owner/repo
+    # Strip scheme
+    if "://" in url:
+        url = url.split("://", 1)[1]
+    # Strip optional token@ prefix
+    if "@" in url:
+        url = url.split("@", 1)[1]
+    # Now: github.com/owner/repo
+    parts = url.split("/")
+    return parts[1] if len(parts) >= 2 else ""
+
+
 def get_remote_url(cwd):
     """Return the HTTPS URL for the repo's origin remote, or empty string."""
     rc, stdout, _ = run_git(["remote", "get-url", "origin"], cwd=cwd)
