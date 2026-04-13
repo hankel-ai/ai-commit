@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -660,18 +661,59 @@ def bg_refresh_then_generate(repo_name):
     }))
 
 
-def bg_create_remote(repo_name):
-    """Create a private GitHub repo and push. Posts result to ui_queue."""
+def bg_create_remote(repo_name, account, visibility):
+    """Create a GitHub repo under the given account and push.
+
+    Args:
+        repo_name: repo key (path string)
+        account: GitHub login to own the new repo
+        visibility: "private" or "public"
+    """
     rs = app.repos.get(repo_name)
     if not rs:
         return
     try:
         cwd = str(rs.path)
+        folder_name = rs.path.name
         kwargs = {}
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+        # Detect currently active account so we can restore it afterwards.
+        original_account = None
+        try:
+            detect = subprocess.run(
+                ["gh", "auth", "status", "--active"],
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                timeout=10, **kwargs,
+            )
+            if detect.returncode == 0:
+                for line in detect.stdout.splitlines() + detect.stderr.splitlines():
+                    if "Logged in" in line and " account " in line:
+                        original_account = line.split(" account ")[1].split()[0].strip()
+                        break
+        except Exception:
+            pass
+
+        # Switch to the target account if it differs from the active one.
+        if account and account != original_account:
+            switch = subprocess.run(
+                ["gh", "auth", "switch", "--user", account],
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                timeout=15, **kwargs,
+            )
+            if switch.returncode != 0:
+                err = switch.stderr.strip() or switch.stdout.strip()
+                ui_queue.put(("create_remote_result", repo_name, False,
+                              f"Failed to switch to account '{account}': {err}"))
+                return
+
+        vis_flag = f"--{visibility}"
         result = subprocess.run(
-            ["gh", "repo", "create", "--private", "--source", cwd, "--push"],
+            ["gh", "repo", "create", f"{account}/{folder_name}",
+             vis_flag, "--source", cwd, "--push"],
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -680,6 +722,19 @@ def bg_create_remote(repo_name):
             timeout=60,
             **kwargs,
         )
+
+        # Restore the original active account (best-effort).
+        if original_account and account != original_account:
+            try:
+                subprocess.run(
+                    ["gh", "auth", "switch", "--user", original_account],
+                    capture_output=True, text=True,
+                    encoding="utf-8", errors="replace",
+                    timeout=15, **kwargs,
+                )
+            except Exception:
+                pass
+
         if result.returncode != 0:
             err = result.stderr.strip() or result.stdout.strip()
             ui_queue.put(("create_remote_result", repo_name, False, err))
@@ -694,6 +749,38 @@ def bg_create_remote(repo_name):
                        "gh repo create timed out after 60 seconds."))
     except Exception as exc:
         ui_queue.put(("create_remote_result", repo_name, False, str(exc)))
+
+
+def bg_detect_gh_accounts(repo_key, click_pos=(0, 0)):
+    """Detect authenticated GitHub accounts. Posts result to ui_queue."""
+    try:
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        result = subprocess.run(
+            ["gh", "auth", "status"],
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=10, **kwargs,
+        )
+        # gh auth status output: "Logged in to github.com account <login> (keyring)"
+        output = result.stdout + "\n" + result.stderr
+        accounts = []
+        active = ""
+        for line in output.splitlines():
+            if "Logged in" in line and " account " in line:
+                login = line.split(" account ")[1].split()[0].strip()
+                accounts.append(login)
+            if "Active account" in line and "true" in line.lower():
+                if accounts:
+                    active = accounts[-1]
+        if not active and accounts:
+            active = accounts[0]
+        ui_queue.put(("gh_accounts_result", repo_key, accounts, active, click_pos))
+    except FileNotFoundError:
+        ui_queue.put(("gh_accounts_result", repo_key, [], "", click_pos))
+    except Exception:
+        ui_queue.put(("gh_accounts_result", repo_key, [], "", click_pos))
 
 
 # ---------------------------------------------------------------------------
@@ -812,14 +899,129 @@ def cb_open_repo_url(sender, app_data, user_data):
 
 
 def cb_create_remote(sender, app_data, user_data):
-    """Create a private GitHub repo for this project and push."""
+    """Detect GitHub accounts then show create-remote popup."""
     repo_key = user_data
     rs = app.repos.get(repo_key)
     if not rs:
         return
-    dpg.set_value(rs.status_tag, "Creating GitHub repo...")
+    # Capture click position so the popup opens nearby.
+    click_pos = dpg.get_mouse_pos()
+    dpg.set_value(rs.status_tag, "Detecting GitHub accounts...")
     dpg.configure_item(rs.status_tag, color=COL_YELLOW)
-    executor.submit(bg_create_remote, repo_key)
+    executor.submit(bg_detect_gh_accounts, repo_key, click_pos)
+
+
+def _show_create_remote_popup(repo_key, accounts, active_account,
+                              click_pos=(0, 0)):
+    """Show popup dialog for creating a GitHub remote."""
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+
+    win_tag = dpg.generate_uuid()
+    combo_tag = dpg.generate_uuid()
+    radio_tag = dpg.generate_uuid()
+
+    folder_name = rs.path.name
+    default_acct = (active_account if active_account in accounts
+                    else accounts[0] if accounts else "")
+
+    # Position the popup near where the user clicked.
+    pop_w, pop_h = 400, 220
+    px = max(0, int(click_pos[0]) - pop_w // 2)
+    py = max(0, int(click_pos[1]))
+
+    with dpg.window(
+        label=f"Create GitHub Repo \u2014 {folder_name}",
+        tag=win_tag,
+        width=pop_w, height=pop_h,
+        pos=(px, py),
+        no_collapse=True,
+        on_close=lambda s, a, u=win_tag: (
+            dpg.delete_item(u) if dpg.does_item_exist(u) else None
+        ),
+    ):
+        with dpg.group(horizontal=True):
+            dpg.add_text("Account:", color=COL_ACCENT)
+            add_btn = dpg.add_button(
+                label="+ Add Account",
+                callback=_cb_add_gh_account,
+                user_data=win_tag,
+            )
+            dpg.bind_item_theme(add_btn, link_btn_theme)
+        if accounts:
+            dpg.add_combo(
+                accounts, tag=combo_tag,
+                default_value=default_acct, width=-1,
+            )
+        else:
+            dpg.add_text("No accounts found — add one above.",
+                         color=COL_DIM)
+            dpg.add_combo([], tag=combo_tag, width=-1)
+        dpg.add_spacer(height=6)
+        dpg.add_text("Visibility:", color=COL_ACCENT)
+        dpg.add_radio_button(
+            ["Private", "Public"], tag=radio_tag,
+            default_value="Private", horizontal=True,
+        )
+        dpg.add_spacer(height=10)
+        with dpg.group(horizontal=True):
+            create_btn = dpg.add_button(
+                label="Create",
+                callback=_cb_confirm_create_remote,
+                user_data=(repo_key, win_tag, combo_tag, radio_tag),
+            )
+            dpg.bind_item_theme(create_btn, green_btn_theme)
+            if not accounts:
+                dpg.configure_item(create_btn, enabled=False)
+            dpg.add_button(
+                label="Cancel",
+                callback=lambda s, a, u=win_tag: (
+                    dpg.delete_item(u) if dpg.does_item_exist(u) else None
+                ),
+            )
+
+
+def _cb_add_gh_account(sender, app_data, user_data):
+    """Open a terminal to run gh auth login, then close the popup."""
+    win_tag = user_data
+    if dpg.does_item_exist(win_tag):
+        dpg.delete_item(win_tag)
+    if sys.platform == "win32":
+        subprocess.Popen(
+            ["cmd", "/c", "start", "cmd", "/k", "gh auth login"],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+    elif sys.platform == "darwin":
+        subprocess.Popen(
+            ["open", "-a", "Terminal",
+             "bash", "-c", "gh auth login; exec bash"],
+        )
+    else:
+        for term in ("gnome-terminal", "konsole", "xterm"):
+            if shutil.which(term):
+                subprocess.Popen([term, "--", "bash", "-c",
+                                  "gh auth login; exec bash"])
+                break
+
+
+def _cb_confirm_create_remote(sender, app_data, user_data):
+    """User confirmed create-remote from the popup."""
+    repo_key, win_tag, combo_tag, radio_tag = user_data
+
+    account = dpg.get_value(combo_tag)
+    visibility_label = dpg.get_value(radio_tag)
+    visibility = "private" if visibility_label == "Private" else "public"
+
+    if dpg.does_item_exist(win_tag):
+        dpg.delete_item(win_tag)
+
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    dpg.set_value(rs.status_tag, f"Creating {visibility} repo on {account}...")
+    dpg.configure_item(rs.status_tag, color=COL_YELLOW)
+    executor.submit(bg_create_remote, repo_key, account, visibility)
 
 
 def cb_open_folder(sender, app_data, user_data):
@@ -1524,6 +1726,14 @@ def process_queue():
             else:
                 dpg.set_value(rs.status_tag, f"Create failed: {detail}")
                 dpg.configure_item(rs.status_tag, color=COL_RED)
+
+        elif kind == "gh_accounts_result":
+            _, repo_key, accounts, active_account, click_pos = msg
+            rs = app.repos.get(repo_key)
+            if rs:
+                dpg.set_value(rs.status_tag, "")
+                _show_create_remote_popup(
+                    repo_key, accounts, active_account, click_pos)
 
         elif kind == "preview_pull_result":
             _, repo_name, commits, diffstat = msg
