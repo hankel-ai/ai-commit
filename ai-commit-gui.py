@@ -937,8 +937,8 @@ def _show_create_remote_popup(repo_key, accounts, active_account,
         width=pop_w, height=pop_h,
         pos=(px, py),
         no_collapse=True,
-        on_close=lambda s, a, u=win_tag: (
-            dpg.delete_item(u) if dpg.does_item_exist(u) else None
+        on_close=lambda s, a, u: (
+            dpg.delete_item(s) if dpg.does_item_exist(s) else None
         ),
     ):
         with dpg.group(horizontal=True):
@@ -976,7 +976,8 @@ def _show_create_remote_popup(repo_key, accounts, active_account,
                 dpg.configure_item(create_btn, enabled=False)
             dpg.add_button(
                 label="Cancel",
-                callback=lambda s, a, u=win_tag: (
+                user_data=win_tag,
+                callback=lambda s, a, u: (
                     dpg.delete_item(u) if dpg.does_item_exist(u) else None
                 ),
             )
@@ -1753,8 +1754,8 @@ def process_queue():
                         tag=win_tag,
                         width=620, height=420,
                         no_collapse=True,
-                        on_close=lambda s, a, u=win_tag: (
-                            dpg.delete_item(u) if dpg.does_item_exist(u) else None
+                        on_close=lambda s, a, u: (
+                            dpg.delete_item(s) if dpg.does_item_exist(s) else None
                         ),
                     ):
                         if commits:
