@@ -629,10 +629,10 @@ def bg_commit_and_push(repo_name, message):
     if not rs:
         return
     try:
-        ok, detail = do_commit_and_push(rs.path, message)
-        ui_queue.put(("commit_result", repo_name, ok, detail))
+        committed, pushed, detail = do_commit_and_push(rs.path, message)
+        ui_queue.put(("commit_result", repo_name, committed, pushed, detail))
     except Exception as exc:
-        ui_queue.put(("commit_result", repo_name, False, str(exc)))
+        ui_queue.put(("commit_result", repo_name, False, False, str(exc)))
 
 
 def bg_refresh_then_generate(repo_name):
@@ -1328,7 +1328,7 @@ def _repo_base_label(rs):
     if rs.behind > 0:
         label += f"  !! {rs.behind} BEHIND"
     elif rs.ahead > 0:
-        label += f"  +{rs.ahead} ahead"
+        label += f"  !! {rs.ahead} NOT PUSHED"
     return label
 
 
@@ -1348,7 +1348,7 @@ def build_repo_section(rs, parent, label_width=0):
     rs.header_tag = dpg.add_collapsing_header(
         label=label,
         parent=parent,
-        default_open=change_count > 0 or rs.behind > 0,
+        default_open=change_count > 0 or rs.behind > 0 or rs.ahead > 0,
     )
 
     # Show local git config overrides in red
@@ -1378,7 +1378,7 @@ def build_repo_section(rs, parent, label_width=0):
                 pull_btn = dpg.add_button(label="Preview Pull", callback=cb_preview_pull, user_data=repo_key)
                 dpg.bind_item_theme(pull_btn, pull_btn_theme)
         else:
-            dpg.add_text(f"  {sync_text}", color=COL_YELLOW, parent=rs.header_tag)
+            dpg.add_text(f"  !! {sync_text} — PUSH REQUIRED !!", color=COL_RED, parent=rs.header_tag)
 
     # Folder name mismatch warning
     if rs.folder_name != rs.name:
@@ -1626,17 +1626,25 @@ def process_queue():
             update_repo_status(rs)
 
         elif kind == "commit_result":
-            _, repo_name, ok, detail = msg
+            _, repo_name, committed, pushed, detail = msg
             rs = app.repos.get(repo_name)
             if not rs:
                 continue
-            if ok:
+            if committed and pushed:
                 rs.gen_status = GenStatus.IDLE
                 rs.commit_message = ""
                 if rs.input_tag and dpg.does_item_exist(rs.input_tag):
                     dpg.set_value(rs.input_tag, "")
                 dpg.set_value(rs.status_tag, "Committed & pushed!")
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
+                executor.submit(bg_refresh_single_repo, repo_name)
+            elif committed and not pushed:
+                rs.gen_status = GenStatus.ERROR
+                rs.commit_message = ""
+                if rs.input_tag and dpg.does_item_exist(rs.input_tag):
+                    dpg.set_value(rs.input_tag, "")
+                rs.error_message = detail
+                update_repo_status(rs)
                 executor.submit(bg_refresh_single_repo, repo_name)
             else:
                 rs.gen_status = GenStatus.ERROR

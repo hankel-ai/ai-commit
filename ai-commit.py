@@ -152,9 +152,11 @@ def main():
     while True:
         action, message = prompt_user(message)
         if action == "accept":
-            ok, detail = do_commit_and_push(target, message)
+            committed, pushed, detail = do_commit_and_push(target, message)
             print(detail)
-            if not ok:
+            if not committed:
+                sys.exit(1)
+            if not pushed:
                 sys.exit(1)
             break
         if action == "regenerate":

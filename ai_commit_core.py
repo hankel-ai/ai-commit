@@ -422,29 +422,28 @@ def generate_message(diff, config):
 def do_commit_and_push(cwd, message):
     """Stage all changes, commit, and attempt to push.
 
-    Returns (success: bool, detail: str).
+    Returns (committed: bool, pushed: bool, detail: str).
     """
     # Stage
     rc, _, stderr = run_git(["add", "-A"], cwd=cwd)
     if rc != 0:
-        return False, f"git add failed: {stderr}"
+        return False, False, f"git add failed: {stderr}"
 
     # Commit
     rc, stdout, stderr = run_git(["commit", "-m", message], cwd=cwd)
     if rc != 0:
-        return False, f"git commit failed: {stderr}"
+        return False, False, f"git commit failed: {stderr}"
 
     detail = stdout.strip()
 
     # Push
     rc, push_out, push_err = run_git(["push"], cwd=cwd)
     if rc != 0:
-        detail += "\nPush failed (no remote or network issue). Commit saved locally."
-        detail += f"\n{push_err.strip()}"
-    else:
-        detail += "\nPushed successfully."
+        detail += f"\nPush failed: {push_err.strip()}"
+        return True, False, detail
 
-    return True, detail
+    detail += "\nPushed successfully."
+    return True, True, detail
 
 
 # ---------------------------------------------------------------------------
