@@ -7,6 +7,7 @@ GitHub API and displays live workflow status with real-time per-step logs.
 """
 
 import json
+import os
 import queue
 import sys
 import threading
@@ -94,12 +95,17 @@ class Viewer:
         dpg.create_context()
         self._create_theme()
 
-        title = (f"GitHub Actions — {self.owner}/{self.repo}"
+        title = (f"GitHub Actions - {self.owner}/{self.repo}"
                  f" @ {self.sha_short}")
-        dpg.create_viewport(
+        vp_kwargs = dict(
             title=title, width=900, height=640,
             min_width=500, min_height=300,
         )
+        icon_path = str(Path(__file__).resolve().parent / "ai-commit-icon.ico")
+        if os.path.isfile(icon_path):
+            vp_kwargs["small_icon"] = icon_path
+            vp_kwargs["large_icon"] = icon_path
+        dpg.create_viewport(**vp_kwargs)
 
         with dpg.window(tag="primary", no_title_bar=True, no_resize=False,
                         no_move=True, no_close=True):
