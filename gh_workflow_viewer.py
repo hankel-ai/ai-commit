@@ -7,11 +7,9 @@ GitHub API and displays live workflow status with real-time per-step logs.
 """
 
 import json
-import os
 import queue
 import sys
 import threading
-import time
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -88,6 +86,7 @@ class Viewer:
         self._run_tabs = {}
         self._step_widgets = {}
         self._step_content = {}
+        self._jobs_fetched = set()
 
     # -- entry point --------------------------------------------------------
 
@@ -112,10 +111,7 @@ class Viewer:
                                   height=-35, border=False):
                 self._tab_bar = dpg.add_tab_bar()
             dpg.add_separator()
-            with dpg.group(horizontal=True):
-                dpg.add_button(label="Open on GitHub",
-                               callback=self._cb_open_github)
-                dpg.add_button(label="Close", callback=self._cb_close)
+            dpg.add_button(label="Close", callback=self._cb_close)
 
         dpg.set_primary_window("primary", True)
         dpg.setup_dearpygui()
@@ -159,14 +155,6 @@ class Viewer:
         dpg.bind_theme(theme)
 
     # -- callbacks ----------------------------------------------------------
-
-    def _cb_open_github(self, sender=None, app_data=None, user_data=None):
-        if self.runs:
-            webbrowser.open(self.runs[0].html_url)
-        else:
-            webbrowser.open(
-                f"https://github.com/{self.owner}/{self.repo}/actions"
-            )
 
     def _cb_close(self, sender=None, app_data=None, user_data=None):
         dpg.stop_dearpygui()
@@ -228,10 +216,11 @@ class Viewer:
                 run.jobs = jobs
                 self.ui_queue.put(("jobs_update", run.id, jobs))
 
-                # Stream live logs from raw job endpoint
                 for job in jobs:
-                    if job.status in ("in_progress", "completed"):
-                        self._stream_job_logs(run.id, job)
+                    jk = f"{run.id}:{job.id}"
+                    if job.status == "completed" and jk not in self._jobs_fetched:
+                        if self._stream_job_logs(run.id, job):
+                            self._jobs_fetched.add(jk)
 
             if all_complete:
                 # Final pass: fetch zip for clean per-step logs
@@ -243,12 +232,15 @@ class Viewer:
             self.stop_event.wait(2.0)
 
     def _stream_job_logs(self, run_id, job):
-        """Fetch raw job log, parse by API step names, post changed steps."""
+        """Fetch raw job log, parse by API step names, post changed steps.
+
+        Returns True if logs were successfully fetched and parsed.
+        """
         log_text = fetch_job_log(
             self.owner, self.repo, job.id, self.token,
         )
         if not log_text:
-            return
+            return False
 
         step_names = [(s.number, s.name) for s in job.steps]
         parsed = parse_job_log_with_steps(log_text, step_names)
@@ -261,6 +253,7 @@ class Viewer:
                 self.ui_queue.put(
                     ("step_log", run_id, job.id, step_num, text)
                 )
+        return bool(parsed)
 
     def _fetch_zip_logs(self, run):
         """Fetch zip logs for a completed run as the final authoritative source."""
@@ -362,6 +355,8 @@ class Viewer:
         if el:
             header_text += f" · {el}"
 
+        cancel_tag = dpg.generate_uuid()
+
         with dpg.tab(label=label, tag=tab_tag, parent=self._tab_bar):
             dpg.add_text(header_text, tag=header_tag, color=color)
             dpg.add_separator()
@@ -380,6 +375,7 @@ class Viewer:
                 )
                 dpg.add_button(
                     label="Cancel Run",
+                    tag=cancel_tag,
                     callback=self._cb_cancel_run,
                     user_data=run.id,
                 )
@@ -388,6 +384,7 @@ class Viewer:
             "tab_tag": tab_tag,
             "header_tag": header_tag,
             "steps_group": steps_group,
+            "cancel_tag": cancel_tag,
             "built": False,
         }
 
@@ -421,6 +418,11 @@ class Viewer:
 
         dpg.set_value(ht, text)
         dpg.configure_item(ht, color=color)
+
+        if status == "completed":
+            ct = info.get("cancel_tag")
+            if ct and dpg.does_item_exist(ct):
+                dpg.configure_item(ct, show=False)
 
     def _update_steps(self, run_id, jobs):
         info = self._run_tabs.get(run_id)
@@ -456,13 +458,19 @@ class Viewer:
         header_tag = dpg.generate_uuid()
         log_tag = dpg.generate_uuid()
 
+        placeholder = ""
+        if step.status == "in_progress":
+            placeholder = "(running — logs appear when step completes)"
+        elif step.status == "queued":
+            placeholder = "(queued)"
+
         with dpg.collapsing_header(
             label=label, tag=header_tag, parent=parent,
             default_open=(step.status == "in_progress"),
         ):
             dpg.add_input_text(
                 tag=log_tag,
-                default_value="",
+                default_value=placeholder,
                 multiline=True, readonly=True,
                 width=-1, height=200,
             )
@@ -486,11 +494,12 @@ class Viewer:
         if dpg.does_item_exist(w["header_tag"]):
             dpg.configure_item(w["header_tag"], label=label)
 
-        # Auto-open when step starts running
-        if (step.status == "in_progress"
-                and w["status"] != "in_progress"
-                and dpg.does_item_exist(w["header_tag"])):
-            dpg.set_value(w["header_tag"], True)
+        if step.status == "in_progress" and w["status"] != "in_progress":
+            if dpg.does_item_exist(w["header_tag"]):
+                dpg.set_value(w["header_tag"], True)
+            lt = w["log_tag"]
+            if dpg.does_item_exist(lt) and not dpg.get_value(lt):
+                dpg.set_value(lt, "(running — logs appear when step completes)")
 
         w["status"] = step.status
         w["conclusion"] = step.conclusion
