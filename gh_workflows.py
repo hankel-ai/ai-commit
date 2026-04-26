@@ -107,15 +107,30 @@ def _api_get(path, token):
         return json.loads(resp.read().decode("utf-8"))
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _api_get_raw(url, token):
-    """GET a URL with auth, follow redirects, return bytes."""
+    """GET a URL with auth, follow redirects safely (strip auth on cross-origin)."""
+    opener = urllib.request.build_opener(_NoRedirect)
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     })
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return resp.read()
+    try:
+        with opener.open(req, timeout=30) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code in (301, 302, 303, 307, 308):
+            redirect_url = exc.headers.get("Location", "")
+            if redirect_url:
+                req2 = urllib.request.Request(redirect_url)
+                with urllib.request.urlopen(req2, timeout=60) as resp:
+                    return resp.read()
+        raise
 
 
 def detect_runs_for_commit(owner, repo, sha, token, *,
@@ -237,6 +252,63 @@ def fetch_run_logs_zip(owner, repo, run_id, token):
         pass
 
     return logs
+
+
+def fetch_job_log(owner, repo, job_id, token):
+    """Fetch the raw log text for a job (works for in-progress and completed).
+
+    The API returns a 302 redirect to a signed URL serving plain text.
+    """
+    try:
+        raw = _api_get_raw(
+            f"{API_BASE}/repos/{owner}/{repo}/actions/jobs/{job_id}/logs",
+            token,
+        )
+        return raw.decode("utf-8", errors="replace")
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+        return ""
+
+
+def parse_job_log_with_steps(log_text, step_names):
+    """Parse raw job log into per-step content using API step names as boundaries.
+
+    The raw log contains ##[group] markers. Some match API step names (step
+    boundaries) and some are sub-groups within a step (e.g. "Docker info").
+    Only split on markers that match an API step name.
+
+    step_names: list of (step_number, step_name) tuples from the API.
+    Returns dict: step_number -> cleaned log text.
+    """
+    if not log_text:
+        return {}
+
+    name_to_number = {name: num for num, name in step_names}
+
+    result = {}
+    current_step_num = name_to_number.get("Set up job")
+    current_lines = []
+
+    for line in log_text.splitlines():
+        stripped = re.sub(r"^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s?", "", line)
+
+        group_match = re.match(r"##\[group\](.*)", stripped)
+        if group_match:
+            group_name = group_match.group(1).strip()
+            if group_name in name_to_number:
+                if current_step_num is not None:
+                    result[current_step_num] = "\n".join(current_lines)
+                current_step_num = name_to_number[group_name]
+                current_lines = []
+                continue
+
+        if current_step_num is not None:
+            cleaned = re.sub(r"##\[endgroup\]", "", stripped)
+            current_lines.append(cleaned)
+
+    if current_step_num is not None:
+        result[current_step_num] = "\n".join(current_lines)
+
+    return result
 
 
 def cancel_run(owner, repo, run_id, token):

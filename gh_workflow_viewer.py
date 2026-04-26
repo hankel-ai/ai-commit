@@ -3,13 +3,12 @@
 
 Launched by ai-commit-gui after a successful push. Reads connection params
 from a temp JSON file passed as the first CLI argument, then polls the
-GitHub API and displays live workflow status with per-step logs.
+GitHub API and displays live workflow status with real-time per-step logs.
 """
 
 import json
 import os
 import queue
-import re
 import sys
 import threading
 import time
@@ -21,7 +20,8 @@ import dearpygui.dearpygui as dpg
 
 from gh_workflows import (
     Run, _api_get, cancel_run, detect_runs_for_commit,
-    fetch_jobs, fetch_run_logs_zip, get_gh_token,
+    fetch_job_log, fetch_jobs, fetch_run_logs_zip,
+    parse_job_log_with_steps,
 )
 
 # ---------------------------------------------------------------------------
@@ -39,20 +39,18 @@ COL_WHITE = (220, 220, 225)
 
 def _status_icon(status, conclusion):
     if status == "completed":
-        mapping = {
+        return {
             "success": ("[OK]", COL_GREEN),
             "failure": ("[FAIL]", COL_RED),
             "cancelled": ("[--]", COL_DIM),
             "skipped": ("[SKIP]", COL_DIM),
             "timed_out": ("[TIMEOUT]", COL_RED),
-        }
-        return mapping.get(conclusion, ("[?]", COL_DIM))
-    mapping = {
+        }.get(conclusion, ("[?]", COL_DIM))
+    return {
         "queued": ("[ ]", COL_DIM),
         "in_progress": (">>>", COL_YELLOW),
         "waiting": ("[..]", COL_DIM),
-    }
-    return mapping.get(status, ("...", COL_DIM))
+    }.get(status, ("...", COL_DIM))
 
 
 def _elapsed(started_at, completed_at=None):
@@ -89,8 +87,7 @@ class Viewer:
         self.runs = []
         self._run_tabs = {}
         self._step_widgets = {}
-        self._step_log_text = {}
-        self._last_zip_fetch = {}
+        self._step_content = {}
 
     # -- entry point --------------------------------------------------------
 
@@ -98,9 +95,10 @@ class Viewer:
         dpg.create_context()
         self._create_theme()
 
-        title = f"GitHub Actions — {self.owner}/{self.repo} @ {self.sha_short}"
+        title = (f"GitHub Actions — {self.owner}/{self.repo}"
+                 f" @ {self.sha_short}")
         dpg.create_viewport(
-            title=title, width=880, height=620,
+            title=title, width=900, height=640,
             min_width=500, min_height=300,
         )
 
@@ -207,13 +205,17 @@ class Viewer:
 
                 try:
                     rd = _api_get(
-                        f"/repos/{self.owner}/{self.repo}/actions/runs/{run.id}",
+                        f"/repos/{self.owner}/{self.repo}"
+                        f"/actions/runs/{run.id}",
                         self.token,
                     )
-                    ns, nc = rd.get("status", run.status), rd.get("conclusion")
+                    ns = rd.get("status", run.status)
+                    nc = rd.get("conclusion")
                     if ns != run.status or nc != run.conclusion:
                         run.status, run.conclusion = ns, nc
-                        self.ui_queue.put(("run_status", run.id, ns, nc))
+                        self.ui_queue.put(
+                            ("run_status", run.id, ns, nc)
+                        )
                 except Exception:
                     pass
 
@@ -226,25 +228,76 @@ class Viewer:
                 run.jobs = jobs
                 self.ui_queue.put(("jobs_update", run.id, jobs))
 
-                now = time.monotonic()
-                if now - self._last_zip_fetch.get(run.id, 0) > 5:
-                    self._fetch_logs(run)
-                    self._last_zip_fetch[run.id] = now
+                # Stream live logs from raw job endpoint
+                for job in jobs:
+                    if job.status in ("in_progress", "completed"):
+                        self._stream_job_logs(run.id, job)
 
             if all_complete:
+                # Final pass: fetch zip for clean per-step logs
                 for run in self.runs:
-                    self._fetch_logs(run)
+                    self._fetch_zip_logs(run)
                 self.ui_queue.put(("all_complete",))
                 return
 
             self.stop_event.wait(2.0)
 
-    def _fetch_logs(self, run):
+    def _stream_job_logs(self, run_id, job):
+        """Fetch raw job log, parse by API step names, post changed steps."""
+        log_text = fetch_job_log(
+            self.owner, self.repo, job.id, self.token,
+        )
+        if not log_text:
+            return
+
+        step_names = [(s.number, s.name) for s in job.steps]
+        parsed = parse_job_log_with_steps(log_text, step_names)
+
+        for step_num, text in parsed.items():
+            key = f"{run_id}:{job.id}:{step_num}"
+            prev = self._step_content.get(key, "")
+            if text != prev:
+                self._step_content[key] = text
+                self.ui_queue.put(
+                    ("step_log", run_id, job.id, step_num, text)
+                )
+
+    def _fetch_zip_logs(self, run):
+        """Fetch zip logs for a completed run as the final authoritative source."""
         logs = fetch_run_logs_zip(
             self.owner, self.repo, run.id, self.token,
         )
-        if logs:
-            self.ui_queue.put(("logs_available", run.id, logs))
+        if not logs:
+            return
+
+        for key, w in self._step_widgets.items():
+            if not key.startswith(f"{run.id}:"):
+                continue
+
+            step_num = w["step_number"]
+            job_name = w["job_name"]
+
+            log_text = None
+            for (job_dir, snum), text in logs.items():
+                if snum == step_num:
+                    if (job_name.lower() in job_dir.lower()
+                            or job_dir.lower() in job_name.lower()):
+                        log_text = text
+                        break
+            if log_text is None:
+                for (job_dir, snum), text in logs.items():
+                    if snum == step_num:
+                        log_text = text
+                        break
+
+            if log_text:
+                prev = self._step_content.get(key, "")
+                if log_text != prev:
+                    self._step_content[key] = log_text
+                    self.ui_queue.put((
+                        "step_log", run.id,
+                        int(key.split(":")[1]), step_num, log_text,
+                    ))
 
     # -- queue processing (main thread) -------------------------------------
 
@@ -282,9 +335,9 @@ class Viewer:
                 _, run_id, jobs = msg
                 self._update_steps(run_id, jobs)
 
-            elif kind == "logs_available":
-                _, run_id, logs = msg
-                self._fill_step_logs(run_id, logs)
+            elif kind == "step_log":
+                _, run_id, job_id, step_num, text = msg
+                self._update_step_log(run_id, job_id, step_num, text)
 
             elif kind == "all_complete":
                 dpg.set_value(self._status_tag, "All runs complete.")
@@ -357,7 +410,9 @@ class Viewer:
                 el = _elapsed(r.created_at)
                 if el:
                     text += f" · {el}"
-                tab_label = f"{r.workflow_name or r.name} #{r.run_number}"
+                tab_label = (
+                    f"{r.workflow_name or r.name} #{r.run_number}"
+                )
                 if conclusion:
                     tab_label += f" ({conclusion})"
                 if dpg.does_item_exist(info["tab_tag"]):
@@ -376,8 +431,10 @@ class Viewer:
             return
 
         if not info["built"]:
-            ph = f"placeholder_{run_id}"
-            if dpg.does_item_exist(ph):
+            ph = f"placeholder_{run.id}" if (run := next(
+                (r for r in self.runs if r.id == run_id), None
+            )) else None
+            if ph and dpg.does_item_exist(ph):
                 dpg.delete_item(ph)
             info["built"] = True
 
@@ -387,7 +444,7 @@ class Viewer:
                 if key not in self._step_widgets:
                     self._create_step(key, parent, job, step)
                 else:
-                    self._update_step(key, step)
+                    self._refresh_step_header(key, step)
 
     def _create_step(self, key, parent, job, step):
         icon, color = _status_icon(step.status, step.conclusion)
@@ -401,14 +458,13 @@ class Viewer:
 
         with dpg.collapsing_header(
             label=label, tag=header_tag, parent=parent,
-            default_open=False,
+            default_open=(step.status == "in_progress"),
         ):
             dpg.add_input_text(
                 tag=log_tag,
                 default_value="",
                 multiline=True, readonly=True,
                 width=-1, height=200,
-                show=True,
             )
 
         self._step_widgets[key] = {
@@ -420,7 +476,7 @@ class Viewer:
             "step_number": step.number,
         }
 
-    def _update_step(self, key, step):
+    def _refresh_step_header(self, key, step):
         w = self._step_widgets[key]
         icon, color = _status_icon(step.status, step.conclusion)
         el = _elapsed(step.started_at, step.completed_at)
@@ -429,54 +485,37 @@ class Viewer:
             label += f"  {el}"
         if dpg.does_item_exist(w["header_tag"]):
             dpg.configure_item(w["header_tag"], label=label)
+
+        # Auto-open when step starts running
+        if (step.status == "in_progress"
+                and w["status"] != "in_progress"
+                and dpg.does_item_exist(w["header_tag"])):
+            dpg.set_value(w["header_tag"], True)
+
         w["status"] = step.status
         w["conclusion"] = step.conclusion
 
-    def _fill_step_logs(self, run_id, logs):
-        for key, w in self._step_widgets.items():
-            if not key.startswith(f"{run_id}:"):
-                continue
-            if key in self._step_log_text:
-                continue
+    def _update_step_log(self, run_id, job_id, step_num, text):
+        key = f"{run_id}:{job_id}:{step_num}"
+        w = self._step_widgets.get(key)
+        if not w:
+            return
+        lt = w["log_tag"]
+        if not dpg.does_item_exist(lt):
+            return
 
-            step_num = w["step_number"]
-            job_name = w["job_name"]
+        lines = text.splitlines()
+        display = text
+        if len(lines) > 3000:
+            display = "\n".join(
+                ["... (truncated, showing last 3000 lines) ..."]
+                + lines[-3000:]
+            )
+            lines = lines[-3000:]
 
-            log_text = None
-            for (job_dir, snum), text in logs.items():
-                if snum == step_num:
-                    if (job_name.lower() in job_dir.lower()
-                            or job_dir.lower() in job_name.lower()):
-                        log_text = text
-                        break
-
-            if log_text is None:
-                for (job_dir, snum), text in logs.items():
-                    if snum == step_num:
-                        log_text = text
-                        break
-
-            if not log_text:
-                continue
-
-            lt = w["log_tag"]
-            if not dpg.does_item_exist(lt):
-                continue
-
-            self._step_log_text[key] = log_text
-
-            lines = log_text.splitlines()
-            display = log_text
-            if len(lines) > 2000:
-                display = "\n".join(
-                    ["... (truncated, showing last 2000 lines) ..."]
-                    + lines[-2000:]
-                )
-                lines = lines[-2000:]
-
-            dpg.set_value(lt, display)
-            height = max(80, min(len(lines) * 15 + 20, 400))
-            dpg.configure_item(lt, height=height)
+        dpg.set_value(lt, display)
+        height = max(80, min(len(lines) * 15 + 20, 400))
+        dpg.configure_item(lt, height=height)
 
 
 # ---------------------------------------------------------------------------
