@@ -472,7 +472,7 @@ class Viewer:
 
         with dpg.collapsing_header(
             label=label, tag=header_tag, parent=parent,
-            default_open=(step.status == "in_progress"),
+            default_open=False,
         ):
             dpg.add_input_text(
                 tag=log_tag,
@@ -501,8 +501,6 @@ class Viewer:
             dpg.configure_item(w["header_tag"], label=label)
 
         if step.status == "in_progress" and w["status"] != "in_progress":
-            if dpg.does_item_exist(w["header_tag"]):
-                dpg.set_value(w["header_tag"], True)
             lt = w["log_tag"]
             if dpg.does_item_exist(lt) and not dpg.get_value(lt):
                 dpg.set_value(lt, "(running — logs appear when step completes)")
