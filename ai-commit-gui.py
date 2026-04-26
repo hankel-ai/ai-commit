@@ -220,6 +220,7 @@ class RepoState:
     github_account: str = ""
     local_name: str = ""
     local_email: str = ""
+    branch: str = ""
     last_commit_msg: str = ""
     last_commit_date: str = ""
     ahead: int = 0
@@ -540,6 +541,7 @@ def bg_poll_repos():
                 git_user = get_git_user(rp)
             github_account = get_github_account(remote_url)
             local_name, local_email = get_git_user_local_override(rp)
+            branch = get_current_branch(rp)
             ahead, behind = get_sync_status(rp, fetch=is_new)
             results[repo_key] = {
                 "path": rp,
@@ -549,6 +551,7 @@ def bg_poll_repos():
                 "github_account": github_account,
                 "local_name": local_name,
                 "local_email": local_email,
+                "branch": branch,
                 "last_commit_msg": last_msg,
                 "last_commit_date": last_date,
                 "ahead": ahead,
@@ -570,6 +573,7 @@ def bg_refresh_single_repo(repo_name):
     git_user = rs.git_user or get_git_user(rp)
     github_account = get_github_account(remote_url)
     local_name, local_email = get_git_user_local_override(rp)
+    branch = get_current_branch(rp)
     ahead, behind = get_sync_status(rp)
     ui_queue.put(("single_repo_refresh", repo_name, {
         "path": rp,
@@ -579,6 +583,7 @@ def bg_refresh_single_repo(repo_name):
         "github_account": github_account,
         "local_name": local_name,
         "local_email": local_email,
+        "branch": branch,
         "last_commit_msg": last_msg,
         "last_commit_date": last_date,
         "ahead": ahead,
@@ -687,12 +692,14 @@ def bg_refresh_then_generate(repo_name):
     last_msg, last_date = get_last_commit(rp)
     remote_url = rs.remote_url or get_remote_url(rp)
     git_user = rs.git_user or get_git_user(rp)
+    branch = get_current_branch(rp)
     ahead, behind = get_sync_status(rp, fetch=False)
     ui_queue.put(("refresh_then_generate", repo_name, {
         "path": rp,
         "entries": entries,
         "remote_url": remote_url,
         "git_user": git_user,
+        "branch": branch,
         "last_commit_msg": last_msg,
         "last_commit_date": last_date,
         "ahead": ahead,
@@ -1364,6 +1371,9 @@ def _repo_base_label(rs):
     # Flag folder name mismatch with a marker
     if rs.folder_name != rs.name:
         name_part = f"* {name_part}"
+    # Show branch name next to repo name
+    if rs.branch:
+        name_part = f"{name_part} [{rs.branch}]"
     if change_count:
         label = f"{name_part} ({change_count} change{'s' if change_count != 1 else ''})"
     else:
@@ -1603,6 +1613,7 @@ def rebuild_repos_ui(results):
             github_account=info.get("github_account", ""),
             local_name=info.get("local_name", ""),
             local_email=info.get("local_email", ""),
+            branch=info.get("branch", ""),
             last_commit_msg=info.get("last_commit_msg", ""),
             last_commit_date=info.get("last_commit_date", ""),
             ahead=info.get("ahead", 0),
@@ -1724,6 +1735,7 @@ def process_queue():
                     "github_account": rs.github_account,
                     "local_name": rs.local_name,
                     "local_email": rs.local_email,
+                    "branch": rs.branch,
                     "last_commit_msg": rs.last_commit_msg,
                     "last_commit_date": rs.last_commit_date,
                     "ahead": rs.ahead,
@@ -1745,6 +1757,7 @@ def process_queue():
                     "github_account": rs.github_account,
                     "local_name": rs.local_name,
                     "local_email": rs.local_email,
+                    "branch": rs.branch,
                     "last_commit_msg": rs.last_commit_msg,
                     "last_commit_date": rs.last_commit_date,
                     "ahead": rs.ahead,
