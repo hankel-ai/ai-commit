@@ -67,6 +67,7 @@ python ai-commit-gui.py --model mistral --poll 15
 - **System tray**: close button hides to tray; right-click tray to Show or Quit
 - **Always-on-top**: compact window stays visible while you work
 - **Drag-to-move**: custom title bar with drag support
+- **GitHub Actions viewer**: after pushing, automatically detects any triggered workflow runs and opens a live status window with per-step logs, run cancellation, and direct GitHub links
 
 ## Options
 
@@ -95,10 +96,12 @@ After generating a commit message, you'll see:
 ## File structure
 
 ```
-ai_commit_core.py    # Shared logic (git helpers, Ollama API, repo discovery)
-ai-commit.py         # CLI wrapper
-ai-commit-gui.py     # Dear PyGui GUI application
-requirements.txt     # GUI dependencies (dearpygui, pystray, Pillow)
+ai_commit_core.py       # Shared logic (git helpers, Ollama API, repo discovery)
+ai-commit.py            # CLI wrapper
+ai-commit-gui.py        # Dear PyGui GUI application
+gh_workflows.py         # GitHub Actions API client (run detection, log fetching)
+gh_workflow_viewer.py   # Standalone Actions viewer window (launched as subprocess)
+requirements.txt        # GUI dependencies (dearpygui, pystray, Pillow)
 ```
 
 ## Commit format

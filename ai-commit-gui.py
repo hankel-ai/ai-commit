@@ -1494,7 +1494,7 @@ def build_repo_section(rs, parent, label_width=0):
         with dpg.group(horizontal=True, parent=rs.header_tag):
             repo_key = str(rs.path)
             rs.gen_btn_tag = dpg.add_button(label="Generate", callback=cb_generate, user_data=repo_key)
-            rs.accept_btn_tag = dpg.add_button(label="Accept & Push", callback=cb_accept, user_data=repo_key)
+            rs.accept_btn_tag = dpg.add_button(label="Commit & Push", callback=cb_accept, user_data=repo_key)
             dpg.bind_item_theme(rs.accept_btn_tag, green_btn_theme)
 
         dpg.add_spacer(height=4, parent=rs.header_tag)

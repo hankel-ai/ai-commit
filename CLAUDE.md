@@ -24,8 +24,8 @@ Default model: `qwen3-coder:480b-cloud` (configurable via settings or `AI_COMMIT
 | `ai-commit-gui.py` | GUI app (Dear PyGui) — monitors repos, generates messages, commit & push |
 | `ai-commit.py` | CLI wrapper for single-repo commit generation |
 | `ai_commit_core.py` | Shared logic: git ops, diff generation, AI provider calls, config defaults |
-| `gh_workflows.py` | GitHub Actions API client: run detection, job/step polling, log zip download |
-| `gh_workflow_viewer.py` | Standalone workflow viewer (separate OS window, launched as subprocess) |
+| `gh_workflows.py` | GitHub Actions API client: run detection, job/step polling, log fetching, run cancellation |
+| `gh_workflow_viewer.py` | Standalone workflow viewer (separate OS window, launched as subprocess via `pythonw.exe`) |
 | `ai-commit-gui-settings.json` | Persisted GUI settings (window pos, provider, model, watched folders) |
 | `requirements.txt` | Python dependencies |
 
@@ -59,7 +59,7 @@ python ai-commit.py [folder] [--provider ollama] [--model qwen3-coder:480b-cloud
 - Main thread processes the queue each frame and updates Dear PyGui widgets
 - `RepoState` dataclass tracks per-repo UI state (tags, entries, status, messages)
 - Settings persist to `ai-commit-gui-settings.json` in project root
-- **GitHub Actions popup**: after a successful push, launches `gh_workflow_viewer.py` as a separate OS window (subprocess). The viewer polls GitHub API for workflow runs matching the pushed commit SHA. If runs are found, shows tabbed UI with per-step collapsible log sections. Logs are fetched from the run-level zip download (clean per-step files). Uses `gh auth token` for authentication.
+- **GitHub Actions viewer**: after a successful push, a background thread polls the GitHub API for workflow runs matching the pushed commit SHA (up to 30s). If runs are found, launches `gh_workflow_viewer.py` as a separate OS window (`subprocess.Popen` with `pythonw.exe`). If no runs exist (repo has no workflows, or push didn't trigger any), no window opens. The viewer shows a tabbed UI with one tab per run, collapsible per-step sections with status icons and duration, and per-tab "Open on GitHub" / "Cancel Run" buttons. Logs are fetched per-job as each job completes (GitHub REST API only serves logs for completed jobs), with a final zip download pass to fill in any gaps (e.g. "Post Run" steps). Uses `gh auth token` for authentication.
 - Setting `actions_popup_enabled` (default true) toggles the feature; stored in `ai-commit-gui-settings.json`
 
 ## Conventions
