@@ -1371,9 +1371,6 @@ def _repo_base_label(rs):
     # Flag folder name mismatch with a marker
     if rs.folder_name != rs.name:
         name_part = f"* {name_part}"
-    # Show branch name next to repo name
-    if rs.branch:
-        name_part = f"{name_part} [{rs.branch}]"
     if change_count:
         label = f"{name_part} ({change_count} change{'s' if change_count != 1 else ''})"
     else:
@@ -1389,14 +1386,19 @@ def build_repo_section(rs, parent, label_width=0):
     """Build the UI section for a single repo inside *parent*."""
     change_count = len(rs.entries)
     label = _repo_base_label(rs)
-    if rs.last_commit_date or rs.github_account:
+    if rs.branch or rs.last_commit_date or rs.github_account:
         pad = max(0, label_width - len(label))
+        right_parts = []
+        if rs.branch:
+            right_parts.append(f"[{rs.branch}]")
         meta_parts = []
         if rs.last_commit_date:
             meta_parts.append(rs.last_commit_date)
         if rs.github_account:
             meta_parts.append(rs.github_account)
-        label += " " * pad + f"  [{' | '.join(meta_parts)}]"
+        if meta_parts:
+            right_parts.append(f"[{' | '.join(meta_parts)}]")
+        label += " " * pad + "  " + " ".join(right_parts)
 
     rs.header_tag = dpg.add_collapsing_header(
         label=label,
