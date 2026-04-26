@@ -95,7 +95,7 @@ from ai_commit_core import (
     run_git,
 )
 
-from gh_workflows import get_gh_token, parse_owner_repo
+from gh_workflows import detect_runs_for_commit, get_gh_token, parse_owner_repo
 
 # ---------------------------------------------------------------------------
 # Win32 API setup (Windows only) — declare argtypes so ctypes handles
@@ -630,7 +630,10 @@ def bg_preview_pull(repo_name):
 
 
 def _launch_workflow_viewer(rs):
-    """Launch the workflow viewer as a separate OS window/process."""
+    """Check for workflow runs, then launch viewer only if any exist.
+
+    Runs in background thread — blocks during detection polling.
+    """
     token = get_gh_token()
     if not token:
         return
@@ -638,6 +641,11 @@ def _launch_workflow_viewer(rs):
     sha = get_head_sha(str(rs.path))
     if not owner or not repo or not sha:
         return
+
+    runs = detect_runs_for_commit(owner, repo, sha, token, timeout=30)
+    if not runs:
+        return
+
     data = {"owner": owner, "repo": repo, "sha": sha, "token": token}
     tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False,
@@ -1674,7 +1682,7 @@ def process_queue():
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
                 executor.submit(bg_refresh_single_repo, repo_name)
                 if app.actions_popup_enabled and rs.remote_url:
-                    _launch_workflow_viewer(rs)
+                    executor.submit(_launch_workflow_viewer, rs)
             elif committed and not pushed:
                 rs.gen_status = GenStatus.ERROR
                 rs.commit_message = ""
