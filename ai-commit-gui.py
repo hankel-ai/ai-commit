@@ -80,11 +80,13 @@ from ai_commit_core import (
     do_commit_and_push,
     do_pull,
     generate_message,
+    get_current_branch,
     get_diff,
     get_git_global_user,
     get_git_user,
     get_git_user_local_override,
     get_github_account,
+    get_head_sha,
     get_incoming_changes,
     get_last_commit,
     get_remote_url,
@@ -92,6 +94,9 @@ from ai_commit_core import (
     get_sync_status,
     run_git,
 )
+
+from gh_workflows import bg_watch_workflows, cancel_run, get_gh_token, parse_owner_repo
+from gh_workflow_window import WorkflowWindow
 
 # ---------------------------------------------------------------------------
 # Win32 API setup (Windows only) — declare argtypes so ctypes handles
@@ -241,6 +246,7 @@ class AppState:
     ollama_url: str = "http://localhost:11434"
     last_poll: float = 0.0
     paused: bool = False
+    actions_popup_enabled: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +271,9 @@ COL_DIM = (120, 120, 130)
 COL_WHITE = (220, 220, 225)
 
 _SETTINGS_FILE = Path(__file__).resolve().parent / "ai-commit-gui-settings.json"
+
+_workflow_windows = {}
+_workflow_cancel_events = {}
 _LOCK_FILE = Path(tempfile.gettempdir()) / ".ai-commit-gui.lock"
 _ICON_FILE = Path(__file__).resolve().parent / "ai-commit-icon.ico"
 _DEFAULT_MODEL = "qwen3-coder:480b-cloud"
@@ -297,6 +306,7 @@ def _save_settings():
             "model": app.model,
             "provider": app.provider,
             "watched_folders": [str(f) for f in app.watched_folders],
+            "actions_popup_enabled": app.actions_popup_enabled,
         }
         _SETTINGS_FILE.write_text(json.dumps(data))
     except Exception:
@@ -876,6 +886,10 @@ def cb_auto_generate(sender, app_data):
 def cb_always_on_top(sender, app_data):
     app.always_on_top = dpg.get_value(sender)
     _set_topmost(app.always_on_top)
+
+
+def cb_actions_popup(sender, app_data):
+    app.actions_popup_enabled = dpg.get_value(sender)
 
 
 def cb_generate(sender, app_data, user_data):
@@ -1638,6 +1652,14 @@ def process_queue():
                 dpg.set_value(rs.status_tag, "Committed & pushed!")
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
                 executor.submit(bg_refresh_single_repo, repo_name)
+                if app.actions_popup_enabled and rs.remote_url:
+                    cancel_evt = threading.Event()
+                    _workflow_cancel_events[repo_name] = cancel_evt
+                    executor.submit(
+                        bg_watch_workflows,
+                        repo_name, str(rs.path), rs.remote_url,
+                        ui_queue, executor, cancel_evt,
+                    )
             elif committed and not pushed:
                 rs.gen_status = GenStatus.ERROR
                 rs.commit_message = ""
@@ -1650,6 +1672,60 @@ def process_queue():
                 rs.gen_status = GenStatus.ERROR
                 rs.error_message = detail
                 update_repo_status(rs)
+
+        elif kind == "workflow_runs_found":
+            _, repo_name, owner, repo, sha, runs = msg
+            ww = _workflow_windows.get(repo_name)
+            if ww and ww.exists():
+                for run in runs:
+                    ww.add_run_tab(run)
+            else:
+                cancel_evt = _workflow_cancel_events.get(repo_name)
+                def _on_close_wf(rn=repo_name):
+                    evt = _workflow_cancel_events.pop(rn, None)
+                    if evt:
+                        evt.set()
+                    _workflow_windows.pop(rn, None)
+                def _on_cancel_run(run_id, o=owner, r=repo):
+                    token = get_gh_token()
+                    if token:
+                        executor.submit(cancel_run, o, r, run_id, token)
+                ww = WorkflowWindow(owner, repo, sha, _on_cancel_run, _on_close_wf)
+                _workflow_windows[repo_name] = ww
+                for run in runs:
+                    ww.add_run_tab(run)
+
+        elif kind == "workflow_run_update":
+            _, run_id, status, conclusion = msg
+            for ww in _workflow_windows.values():
+                if ww.exists():
+                    ww.update_run_status(run_id, status, conclusion)
+
+        elif kind == "workflow_step_update":
+            _, run_id, job_id, step_number, step_name, status, conclusion, started_at, completed_at = msg
+            for ww in _workflow_windows.values():
+                if ww.exists():
+                    ww.update_step(run_id, job_id, step_number, step_name,
+                                   status, conclusion, started_at, completed_at)
+
+        elif kind == "workflow_step_log":
+            _, run_id, job_id, step_number, text, is_final = msg
+            for ww in _workflow_windows.values():
+                if ww.exists():
+                    ww.append_step_log(run_id, job_id, step_number, text, is_final)
+
+        elif kind == "workflow_run_complete":
+            _, run_id, conclusion = msg
+            for ww in _workflow_windows.values():
+                if ww.exists():
+                    ww.mark_run_complete(run_id, conclusion)
+
+        elif kind == "actions_unavailable":
+            _, repo_name, reason = msg
+            rs = app.repos.get(repo_name)
+            if rs and rs.status_tag and dpg.does_item_exist(rs.status_tag):
+                dpg.set_value(rs.status_tag, f"Actions: {reason}")
+                dpg.configure_item(rs.status_tag, color=COL_YELLOW)
 
         elif kind == "repo_loading":
             _, repo_key, repo_display_name = msg
@@ -1897,6 +1973,7 @@ def main():
             app.model = saved["model"]
         if "provider" in saved:
             app.provider = saved["provider"]
+        app.actions_popup_enabled = saved.get("actions_popup_enabled", True)
         if not folders_from_cli:
             # Support new list format and migrate old single-folder format
             saved_folders = saved.get("watched_folders", [])
@@ -2002,6 +2079,9 @@ def main():
             dpg.add_checkbox(label="Run at startup", default_value=_is_startup_enabled(),
                              callback=cb_start_with_windows,
                              tag="startup_chk", show=(sys.platform == "win32"))
+            dpg.add_spacer(width=10)
+            dpg.add_checkbox(label="Actions popup", default_value=app.actions_popup_enabled,
+                             callback=cb_actions_popup)
 
         dpg.add_separator()
 

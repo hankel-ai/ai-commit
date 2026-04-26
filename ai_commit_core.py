@@ -160,6 +160,18 @@ def get_remote_url(cwd):
     return url
 
 
+def get_head_sha(cwd):
+    """Return the full SHA of HEAD, or empty string."""
+    rc, stdout, _ = run_git(["rev-parse", "HEAD"], cwd=cwd)
+    return stdout.strip() if rc == 0 else ""
+
+
+def get_current_branch(cwd):
+    """Return the current branch name, or empty string."""
+    rc, stdout, _ = run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd)
+    return stdout.strip() if rc == 0 else ""
+
+
 def get_last_commit(cwd):
     """Return (subject, short_date) for HEAD, or ("", "")."""
     rc, stdout, _ = run_git(["log", "-1", "--format=%s|%ci"], cwd=cwd)
