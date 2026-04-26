@@ -95,8 +95,7 @@ from ai_commit_core import (
     run_git,
 )
 
-from gh_workflows import bg_watch_workflows, cancel_run, get_gh_token, parse_owner_repo
-from gh_workflow_window import WorkflowWindow
+from gh_workflows import get_gh_token, parse_owner_repo
 
 # ---------------------------------------------------------------------------
 # Win32 API setup (Windows only) — declare argtypes so ctypes handles
@@ -271,9 +270,6 @@ COL_DIM = (120, 120, 130)
 COL_WHITE = (220, 220, 225)
 
 _SETTINGS_FILE = Path(__file__).resolve().parent / "ai-commit-gui-settings.json"
-
-_workflow_windows = {}
-_workflow_cancel_events = {}
 _LOCK_FILE = Path(tempfile.gettempdir()) / ".ai-commit-gui.lock"
 _ICON_FILE = Path(__file__).resolve().parent / "ai-commit-icon.ico"
 _DEFAULT_MODEL = "qwen3-coder:480b-cloud"
@@ -631,6 +627,31 @@ def bg_preview_pull(repo_name):
         ui_queue.put(("preview_pull_result", repo_name, commits, diffstat))
     except Exception as exc:
         ui_queue.put(("preview_pull_result", repo_name, "", str(exc)))
+
+
+def _launch_workflow_viewer(rs):
+    """Launch the workflow viewer as a separate OS window/process."""
+    token = get_gh_token()
+    if not token:
+        return
+    owner, repo = parse_owner_repo(rs.remote_url)
+    sha = get_head_sha(str(rs.path))
+    if not owner or not repo or not sha:
+        return
+    data = {"owner": owner, "repo": repo, "sha": sha, "token": token}
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False,
+        dir=tempfile.gettempdir(),
+    )
+    json.dump(data, tmp)
+    tmp.close()
+    viewer = str(Path(__file__).resolve().parent / "gh_workflow_viewer.py")
+    exe = sys.executable
+    if sys.platform == "win32" and exe.lower().endswith("python.exe"):
+        pw = exe[:-len("python.exe")] + "pythonw.exe"
+        if os.path.isfile(pw):
+            exe = pw
+    subprocess.Popen([exe, viewer, tmp.name])
 
 
 def bg_commit_and_push(repo_name, message):
@@ -1653,13 +1674,7 @@ def process_queue():
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
                 executor.submit(bg_refresh_single_repo, repo_name)
                 if app.actions_popup_enabled and rs.remote_url:
-                    cancel_evt = threading.Event()
-                    _workflow_cancel_events[repo_name] = cancel_evt
-                    executor.submit(
-                        bg_watch_workflows,
-                        repo_name, str(rs.path), rs.remote_url,
-                        ui_queue, executor, cancel_evt,
-                    )
+                    _launch_workflow_viewer(rs)
             elif committed and not pushed:
                 rs.gen_status = GenStatus.ERROR
                 rs.commit_message = ""
@@ -1672,60 +1687,6 @@ def process_queue():
                 rs.gen_status = GenStatus.ERROR
                 rs.error_message = detail
                 update_repo_status(rs)
-
-        elif kind == "workflow_runs_found":
-            _, repo_name, owner, repo, sha, runs = msg
-            ww = _workflow_windows.get(repo_name)
-            if ww and ww.exists():
-                for run in runs:
-                    ww.add_run_tab(run)
-            else:
-                cancel_evt = _workflow_cancel_events.get(repo_name)
-                def _on_close_wf(rn=repo_name):
-                    evt = _workflow_cancel_events.pop(rn, None)
-                    if evt:
-                        evt.set()
-                    _workflow_windows.pop(rn, None)
-                def _on_cancel_run(run_id, o=owner, r=repo):
-                    token = get_gh_token()
-                    if token:
-                        executor.submit(cancel_run, o, r, run_id, token)
-                ww = WorkflowWindow(owner, repo, sha, _on_cancel_run, _on_close_wf)
-                _workflow_windows[repo_name] = ww
-                for run in runs:
-                    ww.add_run_tab(run)
-
-        elif kind == "workflow_run_update":
-            _, run_id, status, conclusion = msg
-            for ww in _workflow_windows.values():
-                if ww.exists():
-                    ww.update_run_status(run_id, status, conclusion)
-
-        elif kind == "workflow_step_update":
-            _, run_id, job_id, step_number, step_name, status, conclusion, started_at, completed_at = msg
-            for ww in _workflow_windows.values():
-                if ww.exists():
-                    ww.update_step(run_id, job_id, step_number, step_name,
-                                   status, conclusion, started_at, completed_at)
-
-        elif kind == "workflow_step_log":
-            _, run_id, job_id, step_number, text, is_final = msg
-            for ww in _workflow_windows.values():
-                if ww.exists():
-                    ww.append_step_log(run_id, job_id, step_number, text, is_final)
-
-        elif kind == "workflow_run_complete":
-            _, run_id, conclusion = msg
-            for ww in _workflow_windows.values():
-                if ww.exists():
-                    ww.mark_run_complete(run_id, conclusion)
-
-        elif kind == "actions_unavailable":
-            _, repo_name, reason = msg
-            rs = app.repos.get(repo_name)
-            if rs and rs.status_tag and dpg.does_item_exist(rs.status_tag):
-                dpg.set_value(rs.status_tag, f"Actions: {reason}")
-                dpg.configure_item(rs.status_tag, color=COL_YELLOW)
 
         elif kind == "repo_loading":
             _, repo_key, repo_display_name = msg

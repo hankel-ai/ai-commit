@@ -24,6 +24,8 @@ Default model: `qwen3-coder:480b-cloud` (configurable via settings or `AI_COMMIT
 | `ai-commit-gui.py` | GUI app (Dear PyGui) — monitors repos, generates messages, commit & push |
 | `ai-commit.py` | CLI wrapper for single-repo commit generation |
 | `ai_commit_core.py` | Shared logic: git ops, diff generation, AI provider calls, config defaults |
+| `gh_workflows.py` | GitHub Actions API client: run detection, job/step polling, log zip download |
+| `gh_workflow_viewer.py` | Standalone workflow viewer (separate OS window, launched as subprocess) |
 | `ai-commit-gui-settings.json` | Persisted GUI settings (window pos, provider, model, watched folders) |
 | `requirements.txt` | Python dependencies |
 
@@ -57,6 +59,8 @@ python ai-commit.py [folder] [--provider ollama] [--model qwen3-coder:480b-cloud
 - Main thread processes the queue each frame and updates Dear PyGui widgets
 - `RepoState` dataclass tracks per-repo UI state (tags, entries, status, messages)
 - Settings persist to `ai-commit-gui-settings.json` in project root
+- **GitHub Actions popup**: after a successful push, launches `gh_workflow_viewer.py` as a separate OS window (subprocess). The viewer polls GitHub API for workflow runs matching the pushed commit SHA. If runs are found, shows tabbed UI with per-step collapsible log sections. Logs are fetched from the run-level zip download (clean per-step files). Uses `gh auth token` for authentication.
+- Setting `actions_popup_enabled` (default true) toggles the feature; stored in `ai-commit-gui-settings.json`
 
 ## Conventions
 
