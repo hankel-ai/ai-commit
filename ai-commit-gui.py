@@ -634,21 +634,26 @@ def bg_preview_pull(repo_name):
         ui_queue.put(("preview_pull_result", repo_name, "", str(exc)))
 
 
-def _launch_workflow_viewer(rs):
+def _launch_workflow_viewer(repo_name, rs):
     """Check for workflow runs, then launch viewer only if any exist.
 
     Runs in background thread — blocks during detection polling.
+    Posts a workflow_check status to ui_queue so the GUI can surface
+    silent failure modes (no gh token, no runs triggered, etc).
     """
     token = get_gh_token()
     if not token:
+        ui_queue.put(("workflow_check", repo_name, "no_token"))
         return
     owner, repo = parse_owner_repo(rs.remote_url)
     sha = get_head_sha(str(rs.path))
     if not owner or not repo or not sha:
+        ui_queue.put(("workflow_check", repo_name, "no_remote"))
         return
 
     runs = detect_runs_for_commit(owner, repo, sha, token, timeout=30)
     if not runs:
+        ui_queue.put(("workflow_check", repo_name, "no_runs"))
         return
 
     data = {"owner": owner, "repo": repo, "sha": sha, "token": token}
@@ -1695,7 +1700,7 @@ def process_queue():
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
                 executor.submit(bg_refresh_single_repo, repo_name)
                 if app.actions_popup_enabled and rs.remote_url:
-                    executor.submit(_launch_workflow_viewer, rs)
+                    executor.submit(_launch_workflow_viewer, repo_name, rs)
             elif committed and not pushed:
                 rs.gen_status = GenStatus.ERROR
                 rs.commit_message = ""
@@ -1708,6 +1713,22 @@ def process_queue():
                 rs.gen_status = GenStatus.ERROR
                 rs.error_message = detail
                 update_repo_status(rs)
+
+        elif kind == "workflow_check":
+            _, repo_name, reason = msg
+            rs = app.repos.get(repo_name)
+            if rs and rs.status_tag and dpg.does_item_exist(rs.status_tag):
+                if reason == "no_runs":
+                    text = "Pushed — no Actions runs triggered for this commit"
+                elif reason == "no_token":
+                    text = "Pushed — Actions check skipped (no gh CLI token)"
+                elif reason == "no_remote":
+                    text = "Pushed — Actions check skipped (no remote/SHA)"
+                else:
+                    text = ""
+                if text:
+                    dpg.set_value(rs.status_tag, text)
+                    dpg.configure_item(rs.status_tag, color=COL_DIM)
 
         elif kind == "repo_loading":
             _, repo_key, repo_display_name = msg
