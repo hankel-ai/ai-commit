@@ -517,8 +517,13 @@ def create_button_theme(color):
 # Background tasks
 # ---------------------------------------------------------------------------
 
-def bg_poll_repos():
-    """Discover repos and get status for each. Posts results to ui_queue."""
+def bg_poll_repos(force=False):
+    """Discover repos and get status for each. Posts results to ui_queue.
+
+    When *force* is True, bypass cached remote_url/git_user and always run a
+    network fetch — same behavior as a fresh startup. Used by the manual
+    Refresh button so a moved remote is picked up without restarting.
+    """
     results = {}
     for folder in app.watched_folders:
         repo_paths = discover_repos(folder)
@@ -528,21 +533,21 @@ def bg_poll_repos():
             ui_queue.put(("repo_loading", repo_key, rp.name))
             entries = get_status(rp)
             last_msg, last_date = get_last_commit(rp)
-            # Only fetch from remote for newly discovered repos
+            # Only fetch from remote for newly discovered repos (or forced)
             existing = app.repos.get(repo_key)
             is_new = existing is None
-            if existing and existing.remote_url:
+            if not force and existing and existing.remote_url:
                 remote_url = existing.remote_url
             else:
                 remote_url = get_remote_url(rp)
-            if existing and existing.git_user:
+            if not force and existing and existing.git_user:
                 git_user = existing.git_user
             else:
                 git_user = get_git_user(rp)
             github_account = get_github_account(remote_url)
             local_name, local_email = get_git_user_local_override(rp)
             branch = get_current_branch(rp)
-            ahead, behind = get_sync_status(rp, fetch=is_new)
+            ahead, behind = get_sync_status(rp, fetch=is_new or force)
             results[repo_key] = {
                 "path": rp,
                 "entries": entries,
@@ -896,7 +901,9 @@ def cb_browse(sender, app_data):
 
 
 def cb_refresh(sender, app_data):
-    trigger_poll()
+    # Manual Refresh = forced poll: re-read remote_url/git_user and fetch,
+    # matching what startup does. Otherwise a moved remote stays cached.
+    trigger_poll(force=True)
 
 
 def cb_pause(sender, app_data):
@@ -1322,7 +1329,7 @@ def setup_tray():
 # UI builders
 # ---------------------------------------------------------------------------
 
-def trigger_poll():
+def trigger_poll(force=False):
     app.last_poll = time.time()
     # Immediately mark all existing repos as loading in the UI
     for rs in app.repos.values():
@@ -1330,7 +1337,7 @@ def trigger_poll():
             old_label = dpg.get_item_label(rs.header_tag)
             if not old_label.endswith(" ..."):
                 dpg.configure_item(rs.header_tag, label=old_label + "  ...")
-    executor.submit(bg_poll_repos)
+    executor.submit(bg_poll_repos, force)
 
 
 def _rebuild_folders_ui():
