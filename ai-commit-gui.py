@@ -1997,21 +1997,12 @@ def rebuild_repos_ui(results, non_git_results=None):
     # Compute max base-label width so dates right-align
     label_width = max((len(_repo_base_label(rs)) for rs in new_repos.values()), default=0)
 
-    # Merge and render interleaved alphabetically by folder name
-    all_items = []
-    for name, rs in new_repos.items():
-        sort_key = str(rs.path).lower()
-        all_items.append((sort_key, "repo", name, rs))
-    for key, ngf in new_non_git.items():
-        sort_key = str(ngf.path).lower()
-        all_items.append((sort_key, "non_git", key, ngf))
-    all_items.sort(key=lambda x: x[0])
+    # Render git repos first (sorted), then non-git folders at the bottom
+    for rs in sorted(new_repos.values(), key=lambda r: str(r.path).lower()):
+        build_repo_section(rs, "repos_container", label_width=label_width)
 
-    for _, item_type, _, item in all_items:
-        if item_type == "repo":
-            build_repo_section(item, "repos_container", label_width=label_width)
-        else:
-            build_non_git_section(item, "repos_container")
+    for ngf in sorted(new_non_git.values(), key=lambda n: str(n.path).lower()):
+        build_non_git_section(ngf, "repos_container")
 
     app.repos = new_repos
     app.non_git_folders = new_non_git
