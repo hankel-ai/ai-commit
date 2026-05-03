@@ -134,6 +134,25 @@ def get_active_github_account():
     return ""
 
 
+def get_repo_visibility(cwd):
+    """Return 'private' or 'public' for the repo, or '' if unknown."""
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        result = subprocess.run(
+            ["gh", "repo", "view", "--json", "visibility", "--jq", ".visibility"],
+            cwd=cwd,
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=10, **kwargs,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip().upper()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
 def get_github_account(remote_url):
     """Extract the GitHub owner/account name from a remote URL.
 

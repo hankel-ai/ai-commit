@@ -89,6 +89,7 @@ from ai_commit_core import (
     get_github_account,
     get_head_sha,
     get_incoming_changes,
+    get_repo_visibility,
     get_last_commit,
     get_remote_url,
     get_status,
@@ -224,6 +225,7 @@ class RepoState:
     local_email: str = ""
     effective_name: str = ""
     effective_email: str = ""
+    visibility: str = ""
     branch: str = ""
     last_commit_msg: str = ""
     last_commit_date: str = ""
@@ -578,6 +580,10 @@ def bg_poll_repos(force=False):
             else:
                 git_user = get_git_user(rp)
             github_account = get_github_account(remote_url)
+            if not force and existing and existing.visibility:
+                visibility = existing.visibility
+            else:
+                visibility = get_repo_visibility(rp) if remote_url else ""
             local_name, local_email = get_git_user_local_override(rp)
             rc_n, eff_name_raw, _ = run_git(["config", "user.name"], cwd=str(rp))
             rc_e, eff_email_raw, _ = run_git(["config", "user.email"], cwd=str(rp))
@@ -591,6 +597,7 @@ def bg_poll_repos(force=False):
                 "remote_url": remote_url,
                 "git_user": git_user,
                 "github_account": github_account,
+                "visibility": visibility,
                 "local_name": local_name,
                 "local_email": local_email,
                 "effective_name": effective_name,
@@ -619,6 +626,7 @@ def bg_refresh_single_repo(repo_name):
     remote_url = rs.remote_url or get_remote_url(rp)
     git_user = rs.git_user or get_git_user(rp)
     github_account = get_github_account(remote_url)
+    visibility = rs.visibility or (get_repo_visibility(rp) if remote_url else "")
     local_name, local_email = get_git_user_local_override(rp)
     rc_n, eff_name_raw, _ = run_git(["config", "user.name"], cwd=str(rp))
     rc_e, eff_email_raw, _ = run_git(["config", "user.email"], cwd=str(rp))
@@ -632,6 +640,7 @@ def bg_refresh_single_repo(repo_name):
         "remote_url": remote_url,
         "git_user": git_user,
         "github_account": github_account,
+        "visibility": visibility,
         "local_name": local_name,
         "local_email": local_email,
         "effective_name": effective_name,
@@ -751,6 +760,7 @@ def bg_refresh_then_generate(repo_name):
     remote_url = rs.remote_url or get_remote_url(rp)
     git_user = rs.git_user or get_git_user(rp)
     github_account = get_github_account(remote_url)
+    visibility = rs.visibility or (get_repo_visibility(rp) if remote_url else "")
     local_name, local_email = get_git_user_local_override(rp)
     rc_n, eff_name_raw, _ = run_git(["config", "user.name"], cwd=str(rp))
     rc_e, eff_email_raw, _ = run_git(["config", "user.email"], cwd=str(rp))
@@ -764,6 +774,7 @@ def bg_refresh_then_generate(repo_name):
         "remote_url": remote_url,
         "git_user": git_user,
         "github_account": github_account,
+        "visibility": visibility,
         "local_name": local_name,
         "local_email": local_email,
         "effective_name": effective_name,
@@ -1458,9 +1469,11 @@ def build_repo_section(rs, parent, label_width=0):
     change_count = len(rs.entries)
     label = _repo_base_label(rs)
     show_account = rs.github_account and rs.github_account != app.active_gh_account
-    if rs.branch or rs.last_commit_date or show_account:
+    if rs.visibility or rs.branch or rs.last_commit_date or show_account:
         pad = max(0, label_width - len(label))
         right_parts = []
+        if rs.visibility:
+            right_parts.append(rs.visibility.lower())
         if rs.branch:
             right_parts.append(f"[{rs.branch}]")
         meta_parts = []
@@ -1957,6 +1970,7 @@ def rebuild_repos_ui(results, non_git_results=None):
             remote_url=info.get("remote_url", ""),
             git_user=info.get("git_user", ""),
             github_account=info.get("github_account", ""),
+            visibility=info.get("visibility", ""),
             local_name=info.get("local_name", ""),
             local_email=info.get("local_email", ""),
             effective_name=info.get("effective_name", ""),
@@ -2121,6 +2135,7 @@ def process_queue():
                     "remote_url": rs.remote_url,
                     "git_user": rs.git_user,
                     "github_account": rs.github_account,
+                    "visibility": rs.visibility,
                     "local_name": rs.local_name,
                     "local_email": rs.local_email,
                     "effective_name": rs.effective_name,
@@ -2145,6 +2160,7 @@ def process_queue():
                     "remote_url": rs.remote_url,
                     "git_user": rs.git_user,
                     "github_account": rs.github_account,
+                    "visibility": rs.visibility,
                     "local_name": rs.local_name,
                     "local_email": rs.local_email,
                     "effective_name": rs.effective_name,
