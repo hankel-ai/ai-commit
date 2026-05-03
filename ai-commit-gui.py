@@ -995,25 +995,30 @@ def cb_poll_changed(sender, app_data):
         if val < 5:
             val = 5
         app.poll_interval = val
+        _save_settings()
     except (ValueError, TypeError):
         pass
 
 
 def cb_auto_generate(sender, app_data):
     app.auto_generate = dpg.get_value(sender)
+    _save_settings()
 
 
 def cb_always_on_top(sender, app_data):
     app.always_on_top = dpg.get_value(sender)
     _set_topmost(app.always_on_top)
+    _save_settings()
 
 
 def cb_actions_popup(sender, app_data):
     app.actions_popup_enabled = dpg.get_value(sender)
+    _save_settings()
 
 
 def cb_show_non_git(sender, app_data):
     app.show_non_git_folders = dpg.get_value(sender)
+    _save_settings()
     trigger_poll()
 
 
@@ -1573,20 +1578,18 @@ def build_repo_section(rs, parent, label_width=0):
     label = _repo_base_label(rs)
     show_account = rs.github_account and rs.github_account != app.active_gh_account
     vis_label = rs.visibility.lower() if rs.visibility else ("LOCAL" if not rs.remote_url else "")
-    if vis_label or rs.branch or rs.last_commit_date or show_account:
+
+    right_parts = []
+    if rs.last_commit_date:
+        right_parts.append(f"[{rs.last_commit_date}]")
+    if vis_label:
+        right_parts.append(vis_label)
+    if rs.branch:
+        right_parts.append(f"[{rs.branch}]")
+    if show_account:
+        right_parts.append(f"[{rs.github_account}]")
+    if right_parts:
         pad = max(0, label_width - len(label))
-        right_parts = []
-        if vis_label:
-            right_parts.append(vis_label)
-        if rs.branch:
-            right_parts.append(f"[{rs.branch}]")
-        meta_parts = []
-        if rs.last_commit_date:
-            meta_parts.append(rs.last_commit_date)
-        if show_account:
-            meta_parts.append(rs.github_account)
-        if meta_parts:
-            right_parts.append(f"[{' | '.join(meta_parts)}]")
         label += " " * pad + "  " + " ".join(right_parts)
 
     rs.header_tag = dpg.add_collapsing_header(
