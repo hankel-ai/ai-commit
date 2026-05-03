@@ -262,6 +262,7 @@ class AppState:
     last_poll: float = 0.0
     paused: bool = False
     actions_popup_enabled: bool = True
+    show_non_git_folders: bool = True
     active_gh_account: str = ""
     global_git_name: str = ""
     global_git_email: str = ""
@@ -323,6 +324,7 @@ def _save_settings():
             "provider": app.provider,
             "watched_folders": [str(f) for f in app.watched_folders],
             "actions_popup_enabled": app.actions_popup_enabled,
+            "show_non_git_folders": app.show_non_git_folders,
         }
         _SETTINGS_FILE.write_text(json.dumps(data))
     except Exception:
@@ -1008,6 +1010,64 @@ def cb_always_on_top(sender, app_data):
 
 def cb_actions_popup(sender, app_data):
     app.actions_popup_enabled = dpg.get_value(sender)
+
+
+def cb_show_non_git(sender, app_data):
+    app.show_non_git_folders = dpg.get_value(sender)
+    trigger_poll()
+
+
+def cb_open_settings(sender, app_data):
+    """Open the settings popup window."""
+    win_tag = "settings_window"
+    if dpg.does_item_exist(win_tag):
+        dpg.focus_item(win_tag)
+        return
+    with dpg.window(
+        label="Settings",
+        tag=win_tag,
+        width=340, height=360,
+        no_collapse=True,
+        on_close=lambda s, a, u: (
+            dpg.delete_item(s) if dpg.does_item_exist(s) else None
+        ),
+    ):
+        dpg.add_text("Polling", color=COL_ACCENT)
+        with dpg.group(horizontal=True):
+            dpg.add_text("Poll interval:", color=COL_DIM)
+            dpg.add_input_int(default_value=app.poll_interval, width=80,
+                              min_value=5, min_clamped=True, max_value=600, max_clamped=True,
+                              callback=cb_poll_changed, step=0)
+            dpg.add_text("s", color=COL_DIM)
+        dpg.add_spacer(height=6)
+        dpg.add_text("Behavior", color=COL_ACCENT)
+        dpg.add_checkbox(label="Auto-generate commit messages",
+                         default_value=app.auto_generate,
+                         callback=cb_auto_generate)
+        dpg.add_checkbox(label="Always on top",
+                         default_value=app.always_on_top,
+                         callback=cb_always_on_top)
+        dpg.add_checkbox(label="Actions popup after push",
+                         default_value=app.actions_popup_enabled,
+                         callback=cb_actions_popup)
+        if sys.platform == "win32":
+            dpg.add_checkbox(label="Run at startup",
+                             default_value=_is_startup_enabled(),
+                             callback=cb_start_with_windows)
+        dpg.add_spacer(height=6)
+        dpg.add_text("Display", color=COL_ACCENT)
+        dpg.add_checkbox(label="Show non-git folders",
+                         default_value=app.show_non_git_folders,
+                         callback=cb_show_non_git)
+        dpg.add_spacer(height=10)
+        save_btn = dpg.add_button(
+            label="Save & Close",
+            callback=lambda: (
+                _save_settings(),
+                dpg.delete_item("settings_window") if dpg.does_item_exist("settings_window") else None,
+            ),
+        )
+        dpg.bind_item_theme(save_btn, green_btn_theme)
 
 
 def cb_generate(sender, app_data, user_data):
@@ -2058,8 +2118,9 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False):
     for rs in sorted(new_repos.values(), key=lambda r: str(r.path).lower()):
         build_repo_section(rs, "repos_container", label_width=label_width)
 
-    for ngf in sorted(new_non_git.values(), key=lambda n: str(n.path).lower()):
-        build_non_git_section(ngf, "repos_container")
+    if app.show_non_git_folders:
+        for ngf in sorted(new_non_git.values(), key=lambda n: str(n.path).lower()):
+            build_non_git_section(ngf, "repos_container")
 
     app.repos = new_repos
     app.non_git_folders = new_non_git
@@ -2093,6 +2154,8 @@ def process_queue():
 
         if kind == "active_gh_account":
             app.active_gh_account = msg[1]
+            if dpg.does_item_exist("gh_account_label"):
+                dpg.set_value("gh_account_label", msg[1] if msg[1] else "")
 
         elif kind == "poll_result":
             results = msg[1]
@@ -2440,6 +2503,7 @@ def main():
         if "provider" in saved:
             app.provider = saved["provider"]
         app.actions_popup_enabled = saved.get("actions_popup_enabled", True)
+        app.show_non_git_folders = saved.get("show_non_git_folders", True)
         if not folders_from_cli:
             # Support new list format and migrate old single-folder format
             saved_folders = saved.get("watched_folders", [])
@@ -2520,36 +2584,20 @@ def main():
         # Watched folders
         dpg.add_group(tag="folders_container")
 
+        _gname, _gemail = get_git_global_user()
+        app.global_git_name = _gname
+        app.global_git_email = _gemail
+
         with dpg.group(horizontal=True):
             dpg.add_button(label="Add Folder", callback=cb_browse)
             dpg.add_button(label="Refresh", callback=cb_refresh)
             dpg.add_button(label="Pause", tag="pause_btn", callback=cb_pause)
+            dpg.add_button(label="Settings", callback=cb_open_settings)
             dpg.add_spacer(width=10)
-            dpg.add_text("Poll:", color=COL_DIM)
-            dpg.add_input_int(default_value=app.poll_interval, width=50,
-                              min_value=5, min_clamped=True, max_value=600, max_clamped=True,
-                              callback=cb_poll_changed, step=0)
-            dpg.add_text("s", color=COL_DIM)
+            dpg.add_text("", tag="gh_account_label", color=COL_GREEN)
             dpg.add_spacer(width=10)
-            _gname, _gemail = get_git_global_user()
-            app.global_git_name = _gname
-            app.global_git_email = _gemail
             _global_label = f"{_gname} <{_gemail}>" if _gname and _gemail else _gname or _gemail or "not set"
-            dpg.add_text(f"Git: {_global_label}", color=COL_DIM)
-
-        with dpg.group(horizontal=True):
-            dpg.add_checkbox(label="Auto-generate", default_value=app.auto_generate,
-                             callback=cb_auto_generate)
-            dpg.add_spacer(width=10)
-            dpg.add_checkbox(label="Always on top", default_value=app.always_on_top,
-                             callback=cb_always_on_top)
-            dpg.add_spacer(width=10)
-            dpg.add_checkbox(label="Run at startup", default_value=_is_startup_enabled(),
-                             callback=cb_start_with_windows,
-                             tag="startup_chk", show=(sys.platform == "win32"))
-            dpg.add_spacer(width=10)
-            dpg.add_checkbox(label="Actions popup", default_value=app.actions_popup_enabled,
-                             callback=cb_actions_popup)
+            dpg.add_text(_global_label, color=COL_DIM)
 
         dpg.add_separator()
 
