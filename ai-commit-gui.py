@@ -611,7 +611,7 @@ def bg_poll_repos(force=False):
         for ngp in non_git_paths:
             ng_key = str(ngp)
             non_git_results[ng_key] = {"path": ngp, "name": ngp.name}
-    ui_queue.put(("poll_result", results, non_git_results))
+    ui_queue.put(("poll_result", results, non_git_results, force))
 
 
 def bg_refresh_single_repo(repo_name):
@@ -1916,7 +1916,7 @@ def _non_git_for_rebuild():
     return {k: {"path": ngf.path, "name": ngf.name} for k, ngf in app.non_git_folders.items()}
 
 
-def rebuild_repos_ui(results, non_git_results=None):
+def rebuild_repos_ui(results, non_git_results=None, clear_errors=False):
     """Rebuild repo sections from poll results.
 
     If a repo's file list changed since last poll, its pending commit message
@@ -1950,17 +1950,19 @@ def rebuild_repos_ui(results, non_git_results=None):
             any_changes = True
 
         # Decide what to keep
-        if files_changed or name not in preserved:
-            msg = ""
-            gen = GenStatus.IDLE
-            err = ""
-        else:
+        if name in preserved:
             prev_msg, prev_gen, prev_err = preserved[name]
-            # Keep message only if still generating or files haven't changed
-            if prev_gen == GenStatus.GENERATING:
+            # Sticky errors survive rebuilds (cleared by manual Refresh)
+            if prev_gen == GenStatus.ERROR and not clear_errors:
                 msg, gen, err = prev_msg, prev_gen, prev_err
+            elif prev_gen == GenStatus.GENERATING:
+                msg, gen, err = prev_msg, prev_gen, prev_err
+            elif files_changed:
+                msg, gen, err = "", GenStatus.IDLE, ""
             else:
                 msg, gen, err = prev_msg, (GenStatus.DONE if prev_msg else GenStatus.IDLE), prev_err
+        else:
+            msg, gen, err = "", GenStatus.IDLE, ""
 
         folder_name = info["path"].name
         git_name = _repo_name_from_url(info.get("remote_url", ""))
@@ -2041,7 +2043,8 @@ def process_queue():
         elif kind == "poll_result":
             results = msg[1]
             non_git = msg[2] if len(msg) > 2 else {}
-            rebuild_repos_ui(results, non_git)
+            clear_errors = msg[3] if len(msg) > 3 else False
+            rebuild_repos_ui(results, non_git, clear_errors=clear_errors)
 
         elif kind == "gen_result":
             _, repo_name, message, error = msg
@@ -2084,7 +2087,6 @@ def process_queue():
                     dpg.set_value(rs.input_tag, "")
                 rs.error_message = detail
                 update_repo_status(rs)
-                executor.submit(bg_refresh_single_repo, repo_name)
             else:
                 rs.gen_status = GenStatus.ERROR
                 rs.error_message = detail
