@@ -1170,6 +1170,49 @@ def cb_open_folder(sender, app_data, user_data):
         subprocess.Popen(["xdg-open", path])
 
 
+def cb_open_file(sender, app_data, user_data):
+    """Open a file with the system default application."""
+    repo_path, filepath = user_data
+    full_path = str(Path(repo_path) / filepath)
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", full_path])
+    elif sys.platform == "win32":
+        os.startfile(full_path)
+    else:
+        subprocess.Popen(["xdg-open", full_path])
+
+
+def cb_view_diff(sender, app_data, user_data):
+    """Launch a separate diff viewer window for a modified file."""
+    repo_path, filepath = user_data
+    executor.submit(bg_launch_diff_viewer, repo_path, filepath)
+
+
+def bg_launch_diff_viewer(repo_path, filepath):
+    """Get the diff and launch a separate viewer window as a subprocess."""
+    rc, stdout, _ = run_git(["diff", "HEAD", "--", filepath], cwd=repo_path)
+    if rc != 0 or not stdout.strip():
+        rc2, stdout2, _ = run_git(["diff", "--cached", "--", filepath], cwd=repo_path)
+        if rc2 == 0 and stdout2.strip():
+            stdout = stdout2
+        elif not stdout.strip():
+            stdout = "(no diff available)"
+    data = {"filepath": filepath, "diff": stdout}
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False,
+        dir=tempfile.gettempdir(), encoding="utf-8",
+    )
+    json.dump(data, tmp)
+    tmp.close()
+    viewer = str(Path(__file__).resolve().parent / "diff_viewer.py")
+    exe = sys.executable
+    if sys.platform == "win32" and exe.lower().endswith("python.exe"):
+        pw = exe[:-len("python.exe")] + "pythonw.exe"
+        if os.path.isfile(pw):
+            exe = pw
+    subprocess.Popen([exe, viewer, tmp.name])
+
+
 def cb_preview_pull(sender, app_data, user_data):
     """Fetch and preview incoming changes before pulling."""
     repo_key = user_data
@@ -1560,9 +1603,20 @@ def build_repo_section(rs, parent, label_width=0):
         color = COL_GREEN if code in ("A", "AM", "??") else COL_YELLOW if code in ("M", "MM") else COL_RED if code == "D" else COL_DIM
         with dpg.group(horizontal=True, parent=rs.files_group_tag):
             dpg.add_text(f"  {lbl:>10}", color=color)
-            dpg.add_text(f"  {filepath}")
+            file_btn = dpg.add_button(
+                label=f"  {filepath}",
+                callback=cb_open_file,
+                user_data=(str(rs.path), filepath),
+            )
+            dpg.bind_item_theme(file_btn, link_btn_theme)
+            if code in ("M", "MM", "AM"):
+                diff_btn = dpg.add_button(
+                    label="View Diff",
+                    callback=cb_view_diff,
+                    user_data=(str(rs.path), filepath),
+                )
+                dpg.bind_item_theme(diff_btn, link_btn_theme)
             if code == "??":
-                dpg.add_spacer(width=-1)
                 btn = dpg.add_button(
                     label="gitignore",
                     callback=cb_gitignore,
