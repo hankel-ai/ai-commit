@@ -1910,6 +1910,11 @@ def _height_for_text(text):
     return max(60, min(400, num_lines * 15 + 8))
 
 
+def _non_git_for_rebuild():
+    """Return the current non-git folders as a dict suitable for rebuild_repos_ui."""
+    return {k: {"path": ngf.path, "name": ngf.name} for k, ngf in app.non_git_folders.items()}
+
+
 def rebuild_repos_ui(results, non_git_results=None):
     """Rebuild repo sections from poll results.
 
@@ -2147,7 +2152,7 @@ def process_queue():
                     "behind": rs.behind,
                 }
             merged[repo_name] = info
-            rebuild_repos_ui(merged)
+            rebuild_repos_ui(merged, _non_git_for_rebuild())
 
         elif kind == "refresh_then_generate":
             _, repo_name, info = msg
@@ -2172,7 +2177,7 @@ def process_queue():
                     "behind": rs.behind,
                 }
             merged[repo_name] = info
-            rebuild_repos_ui(merged)
+            rebuild_repos_ui(merged, _non_git_for_rebuild())
             # Now kick off generation if there are still changes
             rs = app.repos.get(repo_name)
             if rs and rs.entries:
