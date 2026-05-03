@@ -54,13 +54,15 @@ python ai-commit.py [folder] [--provider ollama] [--model qwen3-coder:480b-cloud
 
 ## Architecture
 
-- GUI runs a polling loop that discovers git repos in watched folders and checks for uncommitted changes
+- GUI runs a polling loop that discovers git repos **and non-git folders** in watched folders and checks for uncommitted changes
 - Background tasks (generate, commit+push, pull, poll) run in a `ThreadPoolExecutor` and post results to a `queue.Queue`
 - Main thread processes the queue each frame and updates Dear PyGui widgets
-- `RepoState` dataclass tracks per-repo UI state (tags, entries, status, messages)
+- `RepoState` dataclass tracks per-repo UI state (tags, entries, status, messages); `NonGitFolder` dataclass for non-git directories
 - Settings persist to `ai-commit-gui-settings.json` in project root
 - **GitHub Actions viewer**: after a successful push, a background thread polls the GitHub API for workflow runs matching the pushed commit SHA (up to 30s). If runs are found, launches `gh_workflow_viewer.py` as a separate OS window (`subprocess.Popen` with `pythonw.exe`). If no runs exist (repo has no workflows, or push didn't trigger any), no window opens. The viewer shows a tabbed UI with one tab per run, collapsible per-step sections with status icons and duration, and per-tab "Open on GitHub" / "Cancel Run" buttons. Logs are fetched per-job as each job completes (GitHub REST API only serves logs for completed jobs), with a final zip download pass to fill in any gaps (e.g. "Post Run" steps). Uses `gh auth token` for authentication.
 - Setting `actions_popup_enabled` (default true) toggles the feature; stored in `ai-commit-gui-settings.json`
+- **Smart display**: GitHub account only shown in repo header when it differs from active `gh` CLI user; git name/email only shown when it differs from global config
+- **MORE panel**: lazy-loaded per-repo panel showing gitignored files, branch switcher, local config removal, and GitHub Actions workflow dispatch
 
 ## Conventions
 

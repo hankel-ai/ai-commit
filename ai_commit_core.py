@@ -116,6 +116,24 @@ def get_git_global_user():
     return global_name, global_email
 
 
+def get_active_github_account():
+    """Return the login name of the currently active gh CLI user, or ''."""
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    try:
+        result = subprocess.run(
+            ["gh", "api", "user", "--jq", ".login"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=10, **kwargs,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
 def get_github_account(remote_url):
     """Extract the GitHub owner/account name from a remote URL.
 

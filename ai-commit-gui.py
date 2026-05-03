@@ -80,6 +80,7 @@ from ai_commit_core import (
     do_commit_and_push,
     do_pull,
     generate_message,
+    get_active_github_account,
     get_current_branch,
     get_diff,
     get_git_global_user,
@@ -92,6 +93,7 @@ from ai_commit_core import (
     get_remote_url,
     get_status,
     get_sync_status,
+    is_git_repo,
     run_git,
 )
 
@@ -220,6 +222,8 @@ class RepoState:
     github_account: str = ""
     local_name: str = ""
     local_email: str = ""
+    effective_name: str = ""
+    effective_email: str = ""
     branch: str = ""
     last_commit_msg: str = ""
     last_commit_date: str = ""
@@ -228,10 +232,19 @@ class RepoState:
     # dpg widget tags
     header_tag: int = 0
     files_group_tag: int = 0
+    more_group_tag: int = 0
     input_tag: int = 0
     status_tag: int = 0
     gen_btn_tag: int = 0
     accept_btn_tag: int = 0
+
+
+@dataclass
+class NonGitFolder:
+    path: Path
+    name: str
+    header_tag: int = 0
+    status_tag: int = 0
 
 
 @dataclass
@@ -247,6 +260,10 @@ class AppState:
     last_poll: float = 0.0
     paused: bool = False
     actions_popup_enabled: bool = True
+    active_gh_account: str = ""
+    global_git_name: str = ""
+    global_git_email: str = ""
+    non_git_folders: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -524,16 +541,32 @@ def bg_poll_repos(force=False):
     network fetch — same behavior as a fresh startup. Used by the manual
     Refresh button so a moved remote is picked up without restarting.
     """
+    active_account = get_active_github_account()
+    ui_queue.put(("active_gh_account", active_account))
+
     results = {}
+    non_git_results = {}
     for folder in app.watched_folders:
-        repo_paths = discover_repos(folder)
+        folder_path = Path(folder).resolve()
+        if not folder_path.is_dir():
+            continue
+        if is_git_repo(folder_path):
+            repo_paths = [folder_path]
+            non_git_paths = []
+        else:
+            repo_paths = []
+            non_git_paths = []
+            for child in sorted(folder_path.iterdir()):
+                if child.is_dir() and not child.name.startswith("."):
+                    if is_git_repo(child):
+                        repo_paths.append(child)
+                    else:
+                        non_git_paths.append(child)
         for rp in repo_paths:
             repo_key = str(rp)
-            # Signal that this repo is being refreshed
             ui_queue.put(("repo_loading", repo_key, rp.name))
             entries = get_status(rp)
             last_msg, last_date = get_last_commit(rp)
-            # Only fetch from remote for newly discovered repos (or forced)
             existing = app.repos.get(repo_key)
             is_new = existing is None
             if not force and existing and existing.remote_url:
@@ -546,6 +579,10 @@ def bg_poll_repos(force=False):
                 git_user = get_git_user(rp)
             github_account = get_github_account(remote_url)
             local_name, local_email = get_git_user_local_override(rp)
+            rc_n, eff_name_raw, _ = run_git(["config", "user.name"], cwd=str(rp))
+            rc_e, eff_email_raw, _ = run_git(["config", "user.email"], cwd=str(rp))
+            effective_name = eff_name_raw.strip() if rc_n == 0 else ""
+            effective_email = eff_email_raw.strip() if rc_e == 0 else ""
             branch = get_current_branch(rp)
             ahead, behind = get_sync_status(rp, fetch=is_new or force)
             results[repo_key] = {
@@ -556,13 +593,18 @@ def bg_poll_repos(force=False):
                 "github_account": github_account,
                 "local_name": local_name,
                 "local_email": local_email,
+                "effective_name": effective_name,
+                "effective_email": effective_email,
                 "branch": branch,
                 "last_commit_msg": last_msg,
                 "last_commit_date": last_date,
                 "ahead": ahead,
                 "behind": behind,
             }
-    ui_queue.put(("poll_result", results))
+        for ngp in non_git_paths:
+            ng_key = str(ngp)
+            non_git_results[ng_key] = {"path": ngp, "name": ngp.name}
+    ui_queue.put(("poll_result", results, non_git_results))
 
 
 def bg_refresh_single_repo(repo_name):
@@ -578,6 +620,10 @@ def bg_refresh_single_repo(repo_name):
     git_user = rs.git_user or get_git_user(rp)
     github_account = get_github_account(remote_url)
     local_name, local_email = get_git_user_local_override(rp)
+    rc_n, eff_name_raw, _ = run_git(["config", "user.name"], cwd=str(rp))
+    rc_e, eff_email_raw, _ = run_git(["config", "user.email"], cwd=str(rp))
+    effective_name = eff_name_raw.strip() if rc_n == 0 else ""
+    effective_email = eff_email_raw.strip() if rc_e == 0 else ""
     branch = get_current_branch(rp)
     ahead, behind = get_sync_status(rp)
     ui_queue.put(("single_repo_refresh", repo_name, {
@@ -588,6 +634,8 @@ def bg_refresh_single_repo(repo_name):
         "github_account": github_account,
         "local_name": local_name,
         "local_email": local_email,
+        "effective_name": effective_name,
+        "effective_email": effective_email,
         "branch": branch,
         "last_commit_msg": last_msg,
         "last_commit_date": last_date,
@@ -702,6 +750,12 @@ def bg_refresh_then_generate(repo_name):
     last_msg, last_date = get_last_commit(rp)
     remote_url = rs.remote_url or get_remote_url(rp)
     git_user = rs.git_user or get_git_user(rp)
+    github_account = get_github_account(remote_url)
+    local_name, local_email = get_git_user_local_override(rp)
+    rc_n, eff_name_raw, _ = run_git(["config", "user.name"], cwd=str(rp))
+    rc_e, eff_email_raw, _ = run_git(["config", "user.email"], cwd=str(rp))
+    effective_name = eff_name_raw.strip() if rc_n == 0 else ""
+    effective_email = eff_email_raw.strip() if rc_e == 0 else ""
     branch = get_current_branch(rp)
     ahead, behind = get_sync_status(rp, fetch=False)
     ui_queue.put(("refresh_then_generate", repo_name, {
@@ -709,6 +763,11 @@ def bg_refresh_then_generate(repo_name):
         "entries": entries,
         "remote_url": remote_url,
         "git_user": git_user,
+        "github_account": github_account,
+        "local_name": local_name,
+        "local_email": local_email,
+        "effective_name": effective_name,
+        "effective_email": effective_email,
         "branch": branch,
         "last_commit_msg": last_msg,
         "last_commit_date": last_date,
@@ -1398,7 +1457,8 @@ def build_repo_section(rs, parent, label_width=0):
     """Build the UI section for a single repo inside *parent*."""
     change_count = len(rs.entries)
     label = _repo_base_label(rs)
-    if rs.branch or rs.last_commit_date or rs.github_account:
+    show_account = rs.github_account and rs.github_account != app.active_gh_account
+    if rs.branch or rs.last_commit_date or show_account:
         pad = max(0, label_width - len(label))
         right_parts = []
         if rs.branch:
@@ -1406,7 +1466,7 @@ def build_repo_section(rs, parent, label_width=0):
         meta_parts = []
         if rs.last_commit_date:
             meta_parts.append(rs.last_commit_date)
-        if rs.github_account:
+        if show_account:
             meta_parts.append(rs.github_account)
         if meta_parts:
             right_parts.append(f"[{' | '.join(meta_parts)}]")
@@ -1418,16 +1478,16 @@ def build_repo_section(rs, parent, label_width=0):
         default_open=change_count > 0 or rs.behind > 0 or rs.ahead > 0,
     )
 
-    # Show local git config overrides in red
-    if rs.local_name or rs.local_email:
-        override_parts = []
-        if rs.local_name:
-            override_parts.append(f"name: {rs.local_name}")
-        if rs.local_email:
-            override_parts.append(f"email: {rs.local_email}")
+    # Show identity mismatch when effective name/email differs from global
+    mismatch_parts = []
+    if rs.effective_name and rs.effective_name != app.global_git_name:
+        mismatch_parts.append(f"name: {rs.effective_name}")
+    if rs.effective_email and rs.effective_email != app.global_git_email:
+        mismatch_parts.append(f"email: {rs.effective_email}")
+    if mismatch_parts:
         dpg.add_text(
-            f"  !! Local git config override: {', '.join(override_parts)}",
-            color=COL_RED, parent=rs.header_tag)
+            f"  !! Using different identity: {', '.join(mismatch_parts)}",
+            color=COL_YELLOW, parent=rs.header_tag)
 
     # Sync warning banner — prominent when behind remote
     if rs.behind > 0 or rs.ahead > 0:
@@ -1453,7 +1513,7 @@ def build_repo_section(rs, parent, label_width=0):
             f"  ** Folder mismatch: folder is \"{rs.folder_name}\" but repo is \"{rs.name}\" **",
             color=COL_YELLOW, parent=rs.header_tag)
 
-    # Links row: Open Folder, GitHub, last commit
+    # Links row: Open Folder, GitHub, More
     with dpg.group(horizontal=True, parent=rs.header_tag):
         folder_btn = dpg.add_button(
             label="Folder",
@@ -1465,15 +1525,19 @@ def build_repo_section(rs, parent, label_width=0):
         else:
             btn = dpg.add_button(label="Create-Remote", callback=cb_create_remote, user_data=str(rs.path))
             dpg.bind_item_theme(btn, link_btn_theme)
-        if rs.last_commit_msg:
-            commit_label = rs.last_commit_msg
-            if len(commit_label) > 50:
-                commit_label = commit_label[:47] + "..."
-            if rs.last_commit_date:
-                commit_label = f"latest: {commit_label} — {rs.last_commit_date}"
-            else:
-                commit_label = f"latest: {commit_label}"
-            dpg.add_text(commit_label, color=COL_DIM)
+        more_btn = dpg.add_button(label="More", callback=cb_more, user_data=str(rs.path))
+        dpg.bind_item_theme(more_btn, link_btn_theme)
+
+    # Expandable MORE panel (populated lazily on click)
+    rs.more_group_tag = dpg.add_group(parent=rs.header_tag, show=False)
+
+    # Full latest commit message on its own line
+    if rs.last_commit_msg:
+        if rs.last_commit_date:
+            full_commit_text = f"  latest: {rs.last_commit_msg} — {rs.last_commit_date}"
+        else:
+            full_commit_text = f"  latest: {rs.last_commit_msg}"
+        dpg.add_text(full_commit_text, color=COL_DIM, parent=rs.header_tag, wrap=-1)
 
     rs.files_group_tag = dpg.add_group(parent=rs.header_tag)
     repo_key = str(rs.path)
@@ -1527,6 +1591,274 @@ def build_repo_section(rs, parent, label_width=0):
         rs.input_tag = 0
 
 
+def build_non_git_section(ngf, parent):
+    """Build a minimal UI section for a non-git folder with an Init button."""
+    ngf.header_tag = dpg.add_collapsing_header(
+        label=f"{ngf.name}  (not a git repo)",
+        parent=parent,
+        default_open=False,
+    )
+    with dpg.group(horizontal=True, parent=ngf.header_tag):
+        folder_btn = dpg.add_button(
+            label="Folder",
+            callback=cb_open_folder, user_data=str(ngf.path))
+        dpg.bind_item_theme(folder_btn, link_btn_theme)
+        init_btn = dpg.add_button(
+            label="Init",
+            callback=cb_git_init, user_data=str(ngf.path))
+        dpg.bind_item_theme(init_btn, green_btn_theme)
+    ngf.status_tag = dpg.add_text("", parent=ngf.header_tag)
+
+
+def cb_git_init(sender, app_data, user_data):
+    """Initialize a git repo in the given folder."""
+    executor.submit(bg_git_init, user_data)
+
+
+def bg_git_init(folder_path):
+    """Run git init in a folder. Posts result to ui_queue."""
+    try:
+        rc, stdout, stderr = run_git(["init"], cwd=folder_path)
+        if rc == 0:
+            ui_queue.put(("git_init_result", folder_path, True, stdout.strip()))
+        else:
+            ui_queue.put(("git_init_result", folder_path, False, stderr.strip()))
+    except Exception as exc:
+        ui_queue.put(("git_init_result", folder_path, False, str(exc)))
+
+
+# ---------------------------------------------------------------------------
+# MORE panel
+# ---------------------------------------------------------------------------
+
+def cb_more(sender, app_data, user_data):
+    """Toggle the MORE panel. On first open, fetch data lazily."""
+    repo_key = user_data
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    if rs.more_group_tag and dpg.does_item_exist(rs.more_group_tag):
+        is_shown = dpg.is_item_shown(rs.more_group_tag)
+        if is_shown:
+            dpg.configure_item(rs.more_group_tag, show=False)
+            return
+        dpg.configure_item(rs.more_group_tag, show=True)
+    dpg.delete_item(rs.more_group_tag, children_only=True)
+    dpg.add_text("  Loading...", color=COL_DIM, parent=rs.more_group_tag)
+    executor.submit(bg_fetch_more_data, repo_key)
+
+
+def bg_fetch_more_data(repo_key):
+    """Fetch all data needed for the MORE panel. Posts result to ui_queue."""
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    cwd = str(rs.path)
+
+    # A. Gitignored files (--directory collapses ignored dirs into single entries)
+    rc, stdout, _ = run_git(
+        ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory"],
+        cwd=cwd)
+    ignored_files = stdout.strip().splitlines() if rc == 0 and stdout.strip() else []
+
+    # B. Branches
+    rc, stdout, _ = run_git(["branch", "--list"], cwd=cwd)
+    branches = []
+    current_branch = ""
+    if rc == 0:
+        for line in stdout.splitlines():
+            line_s = line.strip()
+            if line_s.startswith("* "):
+                current_branch = line_s[2:].strip()
+                branches.append(current_branch)
+            elif line_s:
+                branches.append(line_s)
+
+    # C. Local config overrides (already known from rs, but re-check live)
+    local_name, local_email = get_git_user_local_override(cwd)
+
+    # D. Dispatchable workflows
+    workflows = []
+    if rs.remote_url:
+        try:
+            kwargs = {}
+            if os.name == "nt":
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            result = subprocess.run(
+                ["gh", "workflow", "list", "--json", "name,id,state"],
+                cwd=cwd,
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                timeout=15, **kwargs,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                wf_list = json.loads(result.stdout)
+                workflows = [
+                    {"name": w["name"], "id": w["id"]}
+                    for w in wf_list
+                    if w.get("state") == "active"
+                ]
+        except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            pass
+
+    ui_queue.put(("more_data_result", repo_key, {
+        "ignored_files": ignored_files,
+        "branches": branches,
+        "current_branch": current_branch,
+        "local_name": local_name,
+        "local_email": local_email,
+        "workflows": workflows,
+    }))
+
+
+def _build_more_panel(rs, repo_key, data):
+    """Populate the MORE panel with fetched data."""
+    parent = rs.more_group_tag
+    dpg.delete_item(parent, children_only=True)
+    dpg.configure_item(parent, show=True)
+
+    has_content = False
+
+    # A. Gitignored files
+    ignored = data.get("ignored_files", [])
+    if ignored:
+        has_content = True
+        dpg.add_text(f"  Gitignored files ({len(ignored)}):",
+                     color=COL_ACCENT, parent=parent)
+        for f in ignored:
+            dpg.add_text(f"    {f}", color=COL_DIM, parent=parent)
+    else:
+        dpg.add_text("  Gitignored files: none", color=COL_DIM, parent=parent)
+
+    # B. Switch branch
+    branches = data.get("branches", [])
+    current = data.get("current_branch", "")
+    if len(branches) > 1:
+        has_content = True
+        other_branches = [b for b in branches if b != current]
+        with dpg.group(horizontal=True, parent=parent):
+            dpg.add_text("  Switch branch:", color=COL_ACCENT)
+            combo_tag = dpg.add_combo(
+                other_branches,
+                default_value=other_branches[0] if other_branches else "",
+                width=200,
+            )
+            switch_btn = dpg.add_button(
+                label="Switch",
+                callback=cb_switch_branch,
+                user_data=(repo_key, combo_tag),
+            )
+            dpg.bind_item_theme(switch_btn, link_btn_theme)
+    else:
+        dpg.add_text("  Switch branch: only one branch", color=COL_DIM, parent=parent)
+
+    # C. Remove local config override
+    local_name = data.get("local_name", "")
+    local_email = data.get("local_email", "")
+    if local_name or local_email:
+        has_content = True
+        parts = []
+        if local_name:
+            parts.append(f"name={local_name}")
+        if local_email:
+            parts.append(f"email={local_email}")
+        with dpg.group(horizontal=True, parent=parent):
+            dpg.add_text(f"  Local config: {', '.join(parts)}", color=COL_ACCENT)
+            rm_btn = dpg.add_button(
+                label="Remove Override",
+                callback=cb_remove_local_config,
+                user_data=repo_key,
+            )
+            dpg.bind_item_theme(rm_btn, remove_btn_theme)
+    else:
+        dpg.add_text("  Local config override: none", color=COL_DIM, parent=parent)
+
+    # D. Dispatch workflow
+    workflows = data.get("workflows", [])
+    if workflows:
+        has_content = True
+        dpg.add_text("  Run Workflow:", color=COL_ACCENT, parent=parent)
+        for wf in workflows:
+            with dpg.group(horizontal=True, parent=parent):
+                dpg.add_text(f"    {wf['name']}", color=COL_DIM)
+                run_btn = dpg.add_button(
+                    label="Run",
+                    callback=cb_dispatch_workflow,
+                    user_data=(repo_key, wf["id"], wf["name"]),
+                )
+                dpg.bind_item_theme(run_btn, green_btn_theme)
+    else:
+        dpg.add_text("  Run Workflow: no dispatchable workflows", color=COL_DIM,
+                     parent=parent)
+
+    dpg.add_spacer(height=4, parent=parent)
+
+
+def cb_switch_branch(sender, app_data, user_data):
+    repo_key, combo_tag = user_data
+    branch = dpg.get_value(combo_tag)
+    if branch:
+        executor.submit(bg_switch_branch, repo_key, branch)
+
+
+def bg_switch_branch(repo_key, branch):
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    rc, stdout, stderr = run_git(["checkout", branch], cwd=str(rs.path))
+    if rc == 0:
+        ui_queue.put(("more_action_result", repo_key, True, f"Switched to {branch}"))
+        bg_refresh_single_repo(repo_key)
+    else:
+        ui_queue.put(("more_action_result", repo_key, False,
+                      f"Switch failed: {stderr.strip()}"))
+
+
+def cb_remove_local_config(sender, app_data, user_data):
+    executor.submit(bg_remove_local_config, user_data)
+
+
+def bg_remove_local_config(repo_key):
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    cwd = str(rs.path)
+    run_git(["config", "--local", "--unset", "user.name"], cwd=cwd)
+    run_git(["config", "--local", "--unset", "user.email"], cwd=cwd)
+    ui_queue.put(("more_action_result", repo_key, True, "Local config removed"))
+    bg_refresh_single_repo(repo_key)
+
+
+def cb_dispatch_workflow(sender, app_data, user_data):
+    repo_key, wf_id, wf_name = user_data
+    executor.submit(bg_dispatch_workflow, repo_key, wf_id, wf_name)
+
+
+def bg_dispatch_workflow(repo_key, wf_id, wf_name):
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    try:
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        result = subprocess.run(
+            ["gh", "workflow", "run", str(wf_id)],
+            cwd=str(rs.path),
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=30, **kwargs,
+        )
+        if result.returncode == 0:
+            ui_queue.put(("more_action_result", repo_key, True,
+                          f"Dispatched '{wf_name}'"))
+        else:
+            err = result.stderr.strip() or result.stdout.strip()
+            ui_queue.put(("more_action_result", repo_key, False,
+                          f"Dispatch failed: {err}"))
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        ui_queue.put(("more_action_result", repo_key, False, str(exc)))
+
 
 def _get_wrap_width():
     """Estimate how many characters fit in one line of the input widget."""
@@ -1565,7 +1897,7 @@ def _height_for_text(text):
     return max(60, min(400, num_lines * 15 + 8))
 
 
-def rebuild_repos_ui(results):
+def rebuild_repos_ui(results, non_git_results=None):
     """Rebuild repo sections from poll results.
 
     If a repo's file list changed since last poll, its pending commit message
@@ -1627,6 +1959,8 @@ def rebuild_repos_ui(results):
             github_account=info.get("github_account", ""),
             local_name=info.get("local_name", ""),
             local_email=info.get("local_email", ""),
+            effective_name=info.get("effective_name", ""),
+            effective_email=info.get("effective_email", ""),
             branch=info.get("branch", ""),
             last_commit_msg=info.get("last_commit_msg", ""),
             last_commit_date=info.get("last_commit_date", ""),
@@ -1635,13 +1969,33 @@ def rebuild_repos_ui(results):
         )
         new_repos[name] = rs
 
+    # Build non-git folder entries
+    new_non_git = {}
+    if non_git_results:
+        for key, info in non_git_results.items():
+            new_non_git[key] = NonGitFolder(path=info["path"], name=info["name"])
+
     # Compute max base-label width so dates right-align
     label_width = max((len(_repo_base_label(rs)) for rs in new_repos.values()), default=0)
 
-    for rs in new_repos.values():
-        build_repo_section(rs, "repos_container", label_width=label_width)
+    # Merge and render interleaved alphabetically by folder name
+    all_items = []
+    for name, rs in new_repos.items():
+        sort_key = str(rs.path).lower()
+        all_items.append((sort_key, "repo", name, rs))
+    for key, ngf in new_non_git.items():
+        sort_key = str(ngf.path).lower()
+        all_items.append((sort_key, "non_git", key, ngf))
+    all_items.sort(key=lambda x: x[0])
+
+    for _, item_type, _, item in all_items:
+        if item_type == "repo":
+            build_repo_section(item, "repos_container", label_width=label_width)
+        else:
+            build_non_git_section(item, "repos_container")
 
     app.repos = new_repos
+    app.non_git_folders = new_non_git
 
     # Auto-generate for repos with changes and no message
     for name, rs in app.repos.items():
@@ -1670,9 +2024,13 @@ def process_queue():
 
         kind = msg[0]
 
-        if kind == "poll_result":
+        if kind == "active_gh_account":
+            app.active_gh_account = msg[1]
+
+        elif kind == "poll_result":
             results = msg[1]
-            rebuild_repos_ui(results)
+            non_git = msg[2] if len(msg) > 2 else {}
+            rebuild_repos_ui(results, non_git)
 
         elif kind == "gen_result":
             _, repo_name, message, error = msg
@@ -1765,6 +2123,8 @@ def process_queue():
                     "github_account": rs.github_account,
                     "local_name": rs.local_name,
                     "local_email": rs.local_email,
+                    "effective_name": rs.effective_name,
+                    "effective_email": rs.effective_email,
                     "branch": rs.branch,
                     "last_commit_msg": rs.last_commit_msg,
                     "last_commit_date": rs.last_commit_date,
@@ -1787,6 +2147,8 @@ def process_queue():
                     "github_account": rs.github_account,
                     "local_name": rs.local_name,
                     "local_email": rs.local_email,
+                    "effective_name": rs.effective_name,
+                    "effective_email": rs.effective_email,
                     "branch": rs.branch,
                     "last_commit_msg": rs.last_commit_msg,
                     "last_commit_date": rs.last_commit_date,
@@ -1902,6 +2264,29 @@ def process_queue():
                 app.watched_folders.append(folder)
                 _rebuild_folders_ui()
                 trigger_poll()
+
+        elif kind == "git_init_result":
+            _, folder_path, ok, detail = msg
+            if ok:
+                trigger_poll()
+            else:
+                ngf = app.non_git_folders.get(folder_path)
+                if ngf and ngf.status_tag and dpg.does_item_exist(ngf.status_tag):
+                    dpg.set_value(ngf.status_tag, f"Init failed: {detail}")
+                    dpg.configure_item(ngf.status_tag, color=COL_RED)
+
+        elif kind == "more_data_result":
+            _, repo_key, more_data = msg
+            rs = app.repos.get(repo_key)
+            if rs and rs.more_group_tag and dpg.does_item_exist(rs.more_group_tag):
+                _build_more_panel(rs, repo_key, more_data)
+
+        elif kind == "more_action_result":
+            _, repo_key, ok, detail = msg
+            rs = app.repos.get(repo_key)
+            if rs and rs.status_tag and dpg.does_item_exist(rs.status_tag):
+                dpg.set_value(rs.status_tag, detail)
+                dpg.configure_item(rs.status_tag, color=COL_GREEN if ok else COL_RED)
 
         elif kind == "tray_show":
             _show_window()
@@ -2078,6 +2463,8 @@ def main():
             dpg.add_text("s", color=COL_DIM)
             dpg.add_spacer(width=10)
             _gname, _gemail = get_git_global_user()
+            app.global_git_name = _gname
+            app.global_git_email = _gemail
             _global_label = f"{_gname} <{_gemail}>" if _gname and _gemail else _gname or _gemail or "not set"
             dpg.add_text(f"Git: {_global_label}", color=COL_DIM)
 
