@@ -1632,7 +1632,7 @@ def cb_git_init(sender, app_data, user_data):
 def bg_git_init(folder_path):
     """Run git init in a folder. Posts result to ui_queue."""
     try:
-        rc, stdout, stderr = run_git(["init"], cwd=folder_path)
+        rc, stdout, stderr = run_git(["init", "-b", "main"], cwd=folder_path)
         if rc == 0:
             ui_queue.put(("git_init_result", folder_path, True, stdout.strip()))
         else:
