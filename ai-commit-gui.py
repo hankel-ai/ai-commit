@@ -1469,11 +1469,12 @@ def build_repo_section(rs, parent, label_width=0):
     change_count = len(rs.entries)
     label = _repo_base_label(rs)
     show_account = rs.github_account and rs.github_account != app.active_gh_account
-    if rs.visibility or rs.branch or rs.last_commit_date or show_account:
+    vis_label = rs.visibility.lower() if rs.visibility else ("LOCAL" if not rs.remote_url else "")
+    if vis_label or rs.branch or rs.last_commit_date or show_account:
         pad = max(0, label_width - len(label))
         right_parts = []
-        if rs.visibility:
-            right_parts.append(rs.visibility.lower())
+        if vis_label:
+            right_parts.append(vis_label)
         if rs.branch:
             right_parts.append(f"[{rs.branch}]")
         meta_parts = []
