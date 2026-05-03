@@ -191,23 +191,24 @@ def get_current_branch(cwd):
 
 
 def get_last_commit(cwd):
-    """Return (subject, short_date) for HEAD, or ("", "")."""
-    rc, stdout, _ = run_git(["log", "-1", "--format=%s|%ci"], cwd=cwd)
-    if rc != 0 or not stdout.strip():
+    """Return (full_message, short_date) for HEAD, or ("", "")."""
+    # Fetch date separately to avoid delimiter issues with commit body
+    rc, date_out, _ = run_git(["log", "-1", "--format=%ci"], cwd=cwd)
+    if rc != 0:
         return "", ""
-    parts = stdout.strip().split("|", 1)
-    if len(parts) < 2:
-        return parts[0], ""
-    subject = parts[0]
-    # Parse ISO-ish date "2026-03-14 15:30:00 +0100" -> "Mar 14 15:30"
-    date_str = parts[1].strip()
-    try:
-        from datetime import datetime
-        dt = datetime.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
-        short_date = dt.strftime("%b %d %I:%M%p").replace("AM", "am").replace("PM", "pm")
-    except (ValueError, IndexError):
-        short_date = date_str[:16]
-    return subject, short_date
+    short_date = ""
+    date_str = date_out.strip()
+    if date_str:
+        try:
+            from datetime import datetime
+            dt = datetime.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
+            short_date = dt.strftime("%b %d %I:%M%p").replace("AM", "am").replace("PM", "pm")
+        except (ValueError, IndexError):
+            short_date = date_str[:16]
+    # %B = full commit message (subject + body), strip trailing whitespace
+    rc, msg_out, _ = run_git(["log", "-1", "--format=%B"], cwd=cwd)
+    full_msg = msg_out.strip() if rc == 0 else ""
+    return full_msg, short_date
 
 
 def get_sync_status(cwd, fetch=True):

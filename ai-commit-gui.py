@@ -1537,7 +1537,7 @@ def build_repo_section(rs, parent, label_width=0):
             full_commit_text = f"  latest: {rs.last_commit_msg} — {rs.last_commit_date}"
         else:
             full_commit_text = f"  latest: {rs.last_commit_msg}"
-        dpg.add_text(full_commit_text, color=COL_DIM, parent=rs.header_tag, wrap=-1)
+        dpg.add_text(full_commit_text, color=COL_DIM, parent=rs.header_tag, wrap=0)
 
     rs.files_group_tag = dpg.add_group(parent=rs.header_tag)
     repo_key = str(rs.path)
