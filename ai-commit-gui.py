@@ -1222,6 +1222,18 @@ def _cb_confirm_create_remote(sender, app_data, user_data):
     executor.submit(bg_create_remote, repo_key, account, visibility)
 
 
+def cb_open_terminal(sender, app_data, user_data):
+    if not user_data:
+        return
+    path = str(user_data)
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", "-a", "Terminal", path])
+    elif sys.platform == "win32":
+        subprocess.Popen(["cmd.exe", "/k", f"cd /d {path}"], creationflags=subprocess.CREATE_NEW_CONSOLE)
+    else:
+        subprocess.Popen(["x-terminal-emulator", "--working-directory", path])
+
+
 def cb_open_folder(sender, app_data, user_data):
     """Open a folder in Finder (macOS) or Explorer (Windows)."""
     if not user_data:
@@ -1633,8 +1645,12 @@ def build_repo_section(rs, parent, label_width=0):
             f"  ** Folder mismatch: folder is \"{rs.folder_name}\" but repo is \"{rs.name}\" **",
             color=COL_YELLOW, parent=rs.header_tag)
 
-    # Links row: Open Folder, GitHub, More
+    # Links row: Terminal, Open Folder, GitHub, More
     with dpg.group(horizontal=True, parent=rs.header_tag):
+        term_btn = dpg.add_button(
+            label="Terminal",
+            callback=cb_open_terminal, user_data=str(rs.path))
+        dpg.bind_item_theme(term_btn, link_btn_theme)
         folder_btn = dpg.add_button(
             label="Folder",
             callback=cb_open_folder, user_data=str(rs.path))
@@ -1730,6 +1746,10 @@ def build_non_git_section(ngf, parent):
         default_open=False,
     )
     with dpg.group(horizontal=True, parent=ngf.header_tag):
+        term_btn = dpg.add_button(
+            label="Terminal",
+            callback=cb_open_terminal, user_data=str(ngf.path))
+        dpg.bind_item_theme(term_btn, link_btn_theme)
         folder_btn = dpg.add_button(
             label="Folder",
             callback=cb_open_folder, user_data=str(ngf.path))
