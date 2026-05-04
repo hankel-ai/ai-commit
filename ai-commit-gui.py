@@ -2054,7 +2054,12 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False):
 
     new_repos = {}
     any_changes = False
-    for name, info in sorted(results.items(), key=lambda x: x[0].lower()):
+    def _display_sort_key(item):
+        _, info = item
+        git_name = _repo_name_from_url(info.get("remote_url", ""))
+        return (git_name or info["path"].name).lower()
+
+    for name, info in sorted(results.items(), key=_display_sort_key):
         old_rs = app.repos.get(name)
         new_entries = info["entries"]
 
@@ -2118,7 +2123,7 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False):
     label_width = max((len(_repo_base_label(rs)) for rs in new_repos.values()), default=0)
 
     # Render git repos first (sorted), then non-git folders at the bottom
-    for rs in sorted(new_repos.values(), key=lambda r: str(r.path).lower()):
+    for rs in sorted(new_repos.values(), key=lambda r: r.name.lower()):
         build_repo_section(rs, "repos_container", label_width=label_width)
 
     if app.show_non_git_folders:
