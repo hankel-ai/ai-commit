@@ -1879,18 +1879,45 @@ def bg_fetch_more_data(repo_key):
         cwd=cwd)
     ignored_files = stdout.strip().splitlines() if rc == 0 and stdout.strip() else []
 
-    # B. Branches
-    rc, stdout, _ = run_git(["branch", "--list"], cwd=cwd)
-    branches = []
+    # B. Branches (local + remote-only). branch_targets maps the dropdown label
+    # to the git args used to switch to it. Remote-only entries get an explicit
+    # tracking checkout so multi-remote repos still resolve unambiguously.
+    local_branches = []
     current_branch = ""
+    rc, stdout, _ = run_git(["branch", "--list"], cwd=cwd)
     if rc == 0:
         for line in stdout.splitlines():
             line_s = line.strip()
             if line_s.startswith("* "):
                 current_branch = line_s[2:].strip()
-                branches.append(current_branch)
+                local_branches.append(current_branch)
             elif line_s:
-                branches.append(line_s)
+                local_branches.append(line_s)
+
+    branch_options = list(local_branches)
+    branch_targets = {b: ["checkout", b] for b in local_branches}
+
+    rc, stdout, _ = run_git(
+        ["branch", "-r", "--format=%(refname:short)"], cwd=cwd)
+    if rc == 0:
+        seen_short = set(local_branches)
+        for line in stdout.splitlines():
+            full_ref = line.strip()
+            # Skip blanks and HEAD pointers like "origin/HEAD -> origin/main"
+            if not full_ref or "->" in full_ref:
+                continue
+            parts = full_ref.split("/", 1)
+            if len(parts) != 2:
+                continue
+            remote_name, short = parts
+            if not short or short in seen_short:
+                continue
+            seen_short.add(short)
+            label = f"{short}  (remote: {remote_name})"
+            branch_options.append(label)
+            branch_targets[label] = [
+                "checkout", "-b", short, "--track", full_ref,
+            ]
 
     # C. Local config overrides (already known from rs, but re-check live)
     local_name, local_email = get_git_user_local_override(cwd)
@@ -1921,7 +1948,8 @@ def bg_fetch_more_data(repo_key):
 
     ui_queue.put(("more_data_result", repo_key, {
         "ignored_files": ignored_files,
-        "branches": branches,
+        "branches": branch_options,
+        "branch_targets": branch_targets,
         "current_branch": current_branch,
         "local_name": local_name,
         "local_email": local_email,
@@ -1948,18 +1976,19 @@ def _build_more_panel(rs, repo_key, data):
     else:
         dpg.add_text("  Gitignored files: none", color=COL_DIM, parent=parent)
 
-    # B. Switch branch
+    # B. Switch branch (local + remote-only)
     branches = data.get("branches", [])
     current = data.get("current_branch", "")
-    if len(branches) > 1:
+    rs.more_branch_targets = data.get("branch_targets", {})
+    other_branches = [b for b in branches if b != current]
+    if other_branches:
         has_content = True
-        other_branches = [b for b in branches if b != current]
         with dpg.group(horizontal=True, parent=parent):
             dpg.add_text("  Switch branch:", color=COL_ACCENT)
             combo_tag = dpg.add_combo(
                 other_branches,
-                default_value=other_branches[0] if other_branches else "",
-                width=200,
+                default_value=other_branches[0],
+                width=280,
             )
             switch_btn = dpg.add_button(
                 label="Switch",
@@ -2014,18 +2043,24 @@ def _build_more_panel(rs, repo_key, data):
 
 def cb_switch_branch(sender, app_data, user_data):
     repo_key, combo_tag = user_data
-    branch = dpg.get_value(combo_tag)
-    if branch:
-        executor.submit(bg_switch_branch, repo_key, branch)
-
-
-def bg_switch_branch(repo_key, branch):
+    label = dpg.get_value(combo_tag)
+    if not label:
+        return
     rs = app.repos.get(repo_key)
     if not rs:
         return
-    rc, stdout, stderr = run_git(["checkout", branch], cwd=str(rs.path))
+    targets = getattr(rs, "more_branch_targets", {})
+    args = targets.get(label, ["checkout", label])
+    executor.submit(bg_switch_branch, repo_key, label, args)
+
+
+def bg_switch_branch(repo_key, label, args):
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    rc, stdout, stderr = run_git(args, cwd=str(rs.path))
     if rc == 0:
-        ui_queue.put(("more_action_result", repo_key, True, f"Switched to {branch}"))
+        ui_queue.put(("more_action_result", repo_key, True, f"Switched to {label}"))
         bg_refresh_single_repo(repo_key)
     else:
         ui_queue.put(("more_action_result", repo_key, False,
