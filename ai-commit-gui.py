@@ -184,6 +184,32 @@ if sys.platform == "win32":
     ]
     _dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
 
+    # CallWindowProcW — used to chain to the original WNDPROC after subclassing
+    _user32.CallWindowProcW.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+        ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    _user32.CallWindowProcW.restype = ctypes.c_long
+
+    # shell32 drag-and-drop
+    _shell32 = ctypes.windll.shell32
+    _shell32.DragAcceptFiles.argtypes = [ctypes.c_void_p, ctypes.c_bool]
+    _shell32.DragAcceptFiles.restype = None
+    _shell32.DragQueryFileW.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint,
+    ]
+    _shell32.DragQueryFileW.restype = ctypes.c_uint
+    _shell32.DragFinish.argtypes = [ctypes.c_void_p]
+    _shell32.DragFinish.restype = None
+
+    WNDPROC_TYPE = ctypes.WINFUNCTYPE(
+        ctypes.c_long,        # LRESULT
+        ctypes.c_void_p,      # HWND
+        ctypes.c_uint,        # UINT msg
+        ctypes.c_void_p,      # WPARAM
+        ctypes.c_void_p,      # LPARAM
+    )
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -424,6 +450,47 @@ def _set_dark_title_bar():
         _hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE,
         ctypes.byref(value), ctypes.sizeof(value),
     )
+
+
+# Drag-and-drop: subclass the viewport WNDPROC to handle WM_DROPFILES.
+# Strong refs prevent the WNDPROC callback from being garbage-collected
+# while Windows still holds a pointer to it.
+_drop_orig_wndproc = None
+_drop_wndproc_ref = None
+_drop_installed = False
+
+
+def _drop_wndproc(hwnd, msg, wparam, lparam):
+    WM_DROPFILES = 0x0233
+    if msg == WM_DROPFILES:
+        try:
+            hdrop = wparam
+            count = _shell32.DragQueryFileW(hdrop, 0xFFFFFFFF, None, 0)
+            for i in range(count):
+                length = _shell32.DragQueryFileW(hdrop, i, None, 0)
+                buf = ctypes.create_unicode_buffer(length + 1)
+                _shell32.DragQueryFileW(hdrop, i, buf, length + 1)
+                path = buf.value
+                if path:
+                    ui_queue.put(("folder_selected", path))
+            _shell32.DragFinish(hdrop)
+        except Exception:
+            pass
+        return 0
+    return _user32.CallWindowProcW(_drop_orig_wndproc, hwnd, msg, wparam, lparam)
+
+
+def _install_drop_target():
+    """Register the viewport for OS folder/file drops (Windows only)."""
+    global _drop_orig_wndproc, _drop_wndproc_ref, _drop_installed
+    if _drop_installed or not _hwnd or sys.platform != "win32":
+        return
+    GWLP_WNDPROC = -4
+    _drop_wndproc_ref = WNDPROC_TYPE(_drop_wndproc)
+    new_ptr = ctypes.cast(_drop_wndproc_ref, ctypes.c_void_p)
+    _drop_orig_wndproc = _user32.SetWindowLongPtrW(_hwnd, GWLP_WNDPROC, new_ptr)
+    _shell32.DragAcceptFiles(_hwnd, True)
+    _drop_installed = True
 
 
 def _set_topmost(on_top):
@@ -2667,6 +2734,7 @@ def main():
         if _hwnd:
             if app.always_on_top:
                 _set_topmost(True)
+            _install_drop_target()
             _hwnd_ready = True
         if _debug_mode:
             print(f"[debug] HWND={_hwnd} ready={_hwnd_ready}", flush=True)
@@ -2697,6 +2765,7 @@ def main():
                 if app.always_on_top:
                     _set_topmost(True)
                 _hide_taskbar_icon()
+                _install_drop_target()
                 _hwnd_ready = True
             _hwnd_retry_count += 1
 
