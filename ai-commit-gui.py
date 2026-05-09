@@ -2377,13 +2377,12 @@ def process_queue():
                 if app.actions_popup_enabled and rs.remote_url:
                     executor.submit(_launch_workflow_viewer, repo_name, rs)
             elif committed and not pushed and detail == "LOCAL_ONLY":
-                rs.gen_status = GenStatus.IDLE
+                rs.gen_status = GenStatus.ERROR
                 rs.commit_message = ""
                 if rs.input_tag and dpg.does_item_exist(rs.input_tag):
                     dpg.set_value(rs.input_tag, "")
-                dpg.set_value(rs.status_tag, "Not pushing — LOCAL repo only")
-                dpg.configure_item(rs.status_tag, color=COL_RED)
-                executor.submit(bg_refresh_single_repo, repo_name)
+                rs.error_message = "Not pushing — LOCAL repo only"
+                update_repo_status(rs)
             elif committed and not pushed:
                 rs.gen_status = GenStatus.ERROR
                 rs.commit_message = ""
