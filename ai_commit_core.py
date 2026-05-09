@@ -486,7 +486,11 @@ def do_commit_and_push(cwd, message):
 
     detail = stdout.strip()
 
-    # Push
+    # Push — skip if no remote configured
+    rc_remote, _, _ = run_git(["remote", "get-url", "origin"], cwd=cwd)
+    if rc_remote != 0:
+        return True, False, "LOCAL_ONLY"
+
     rc, push_out, push_err = run_git(["push"], cwd=cwd)
     if rc != 0:
         detail += f"\nPush failed: {push_err.strip()}"
