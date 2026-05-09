@@ -1475,7 +1475,10 @@ def cb_accept(sender, app_data, user_data):
     else:
         message = widget_text
     rs.gen_status = GenStatus.GENERATING
-    dpg.set_value(rs.status_tag, "Committing & pushing...")
+    if rs.remote_url:
+        dpg.set_value(rs.status_tag, "Committing & pushing...")
+    else:
+        dpg.set_value(rs.status_tag, "Committing...")
     dpg.configure_item(rs.status_tag, color=COL_YELLOW)
     executor.submit(bg_commit_and_push, repo_name, message)
 
@@ -1845,8 +1848,12 @@ def build_repo_section(rs, parent, label_width=0):
         with dpg.group(horizontal=True, parent=rs.header_tag):
             repo_key = str(rs.path)
             rs.gen_btn_tag = dpg.add_button(label="Generate", callback=cb_generate, user_data=repo_key)
-            rs.accept_btn_tag = dpg.add_button(label="Commit & Push", callback=cb_accept, user_data=repo_key)
-            dpg.bind_item_theme(rs.accept_btn_tag, green_btn_theme)
+            if rs.remote_url:
+                rs.accept_btn_tag = dpg.add_button(label="Commit & Push", callback=cb_accept, user_data=repo_key)
+                dpg.bind_item_theme(rs.accept_btn_tag, green_btn_theme)
+            else:
+                rs.accept_btn_tag = dpg.add_button(label="Commit", callback=cb_accept, user_data=repo_key)
+                dpg.bind_item_theme(rs.accept_btn_tag, orange_btn_theme)
 
         dpg.add_spacer(height=4, parent=rs.header_tag)
     else:
@@ -2377,13 +2384,13 @@ def process_queue():
                 if app.actions_popup_enabled and rs.remote_url:
                     executor.submit(_launch_workflow_viewer, repo_name, rs)
             elif committed and not pushed and detail == "LOCAL_ONLY":
-                rs.gen_status = GenStatus.ERROR
+                rs.gen_status = GenStatus.IDLE
                 rs.commit_message = ""
                 if rs.input_tag and dpg.does_item_exist(rs.input_tag):
                     dpg.set_value(rs.input_tag, "")
-                rs.error_message = "Not pushing - LOCAL repo only"
-                dpg.set_value(rs.status_tag, rs.error_message)
-                dpg.configure_item(rs.status_tag, color=COL_RED)
+                dpg.set_value(rs.status_tag, "Committed!")
+                dpg.configure_item(rs.status_tag, color=COL_GREEN)
+                executor.submit(bg_refresh_single_repo, repo_name)
             elif committed and not pushed:
                 rs.gen_status = GenStatus.ERROR
                 rs.commit_message = ""
@@ -2639,6 +2646,7 @@ def parse_args():
 
 
 green_btn_theme = None
+orange_btn_theme = None
 link_btn_theme = None
 remove_btn_theme = None
 pull_btn_theme = None
@@ -2664,7 +2672,7 @@ def _acquire_instance_lock():
 
 
 def main():
-    global green_btn_theme, link_btn_theme, remove_btn_theme, pull_btn_theme, _pending_topmost
+    global green_btn_theme, orange_btn_theme, link_btn_theme, remove_btn_theme, pull_btn_theme, _pending_topmost
 
     _acquire_instance_lock()
     args = parse_args()
@@ -2735,6 +2743,7 @@ def main():
     global_theme = create_theme()
     dpg.bind_theme(global_theme)
     green_btn_theme = create_button_theme((50, 130, 75))
+    orange_btn_theme = create_button_theme((200, 130, 30))
     pull_btn_theme = create_button_theme((200, 60, 60))
 
     # Link-styled button theme: transparent background, accent-colored text
