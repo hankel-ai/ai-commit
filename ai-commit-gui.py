@@ -2381,8 +2381,9 @@ def process_queue():
                 rs.commit_message = ""
                 if rs.input_tag and dpg.does_item_exist(rs.input_tag):
                     dpg.set_value(rs.input_tag, "")
-                rs.error_message = "Not pushing — LOCAL repo only"
-                update_repo_status(rs)
+                rs.error_message = "Not pushing - LOCAL repo only"
+                dpg.set_value(rs.status_tag, rs.error_message)
+                dpg.configure_item(rs.status_tag, color=COL_RED)
             elif committed and not pushed:
                 rs.gen_status = GenStatus.ERROR
                 rs.commit_message = ""
