@@ -257,6 +257,7 @@ class RepoState:
     last_commit_date: str = ""
     ahead: int = 0
     behind: int = 0
+    gen_entries: list = field(default_factory=list)
     # dpg widget tags
     header_tag: int = 0
     files_group_tag: int = 0
@@ -824,6 +825,11 @@ def bg_commit_and_push(repo_name, message):
     if not rs:
         return
     try:
+        if rs.gen_entries:
+            current = get_status(rs.path)
+            if current != rs.gen_entries:
+                ui_queue.put(("commit_result", repo_name, False, False, "STALE"))
+                return
         committed, pushed, detail = do_commit_and_push(rs.path, message)
         ui_queue.put(("commit_result", repo_name, committed, pushed, detail))
     except Exception as exc:
@@ -2362,6 +2368,7 @@ def process_queue():
                 rs.gen_status = GenStatus.DONE
                 rs.commit_message = message
                 rs.error_message = ""
+                rs.gen_entries = list(rs.entries)
                 if rs.input_tag and dpg.does_item_exist(rs.input_tag):
                     display = _wrap_for_display(message)
                     dpg.set_value(rs.input_tag, display)
@@ -2373,7 +2380,11 @@ def process_queue():
             rs = app.repos.get(repo_name)
             if not rs:
                 continue
-            if committed and pushed:
+            if not committed and detail == "STALE":
+                rs.gen_status = GenStatus.ERROR
+                rs.error_message = "Files changed since message was generated - please regenerate"
+                update_repo_status(rs)
+            elif committed and pushed:
                 rs.gen_status = GenStatus.IDLE
                 rs.commit_message = ""
                 if rs.input_tag and dpg.does_item_exist(rs.input_tag):
