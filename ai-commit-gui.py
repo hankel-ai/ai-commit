@@ -687,8 +687,12 @@ def bg_poll_repos(force=False):
     ui_queue.put(("poll_result", results, non_git_results, force))
 
 
-def bg_refresh_single_repo(repo_name):
-    """Re-poll a single repo and post its updated info to ui_queue."""
+def bg_refresh_single_repo(repo_name, force=False):
+    """Re-poll a single repo and post its updated info to ui_queue.
+
+    When *force* is True, bypass cached remote_url/git_user/visibility and
+    always run git fetch — same as the initial load or manual Refresh.
+    """
     rs = app.repos.get(repo_name)
     if not rs:
         return
@@ -696,10 +700,17 @@ def bg_refresh_single_repo(repo_name):
     ui_queue.put(("repo_loading", repo_name, rp.name))
     entries = get_status(rp)
     last_msg, last_date = get_last_commit(rp)
-    remote_url = rs.remote_url or get_remote_url(rp)
-    git_user = rs.git_user or get_git_user(rp)
+    if force:
+        remote_url = get_remote_url(rp)
+        git_user = get_git_user(rp)
+    else:
+        remote_url = rs.remote_url or get_remote_url(rp)
+        git_user = rs.git_user or get_git_user(rp)
     github_account = get_github_account(remote_url)
-    visibility = rs.visibility or (get_repo_visibility(rp) if remote_url else "")
+    if force:
+        visibility = get_repo_visibility(rp) if remote_url else ""
+    else:
+        visibility = rs.visibility or (get_repo_visibility(rp) if remote_url else "")
     local_name, local_email = get_git_user_local_override(rp)
     rc_n, eff_name_raw, _ = run_git(["config", "user.name"], cwd=str(rp))
     rc_e, eff_email_raw, _ = run_git(["config", "user.email"], cwd=str(rp))
@@ -1047,6 +1058,33 @@ def cb_refresh(sender, app_data):
     # Manual Refresh = forced poll: re-read remote_url/git_user and fetch,
     # matching what startup does. Otherwise a moved remote stays cached.
     trigger_poll(force=True)
+
+
+def cb_repo_right_click(sender, app_data, user_data):
+    """Show a context menu when a repo header is right-clicked."""
+    repo_key = user_data
+    menu_tag = "repo_context_menu"
+    if dpg.does_item_exist(menu_tag):
+        dpg.delete_item(menu_tag)
+    mx, my = dpg.get_mouse_pos(local=False)
+    with dpg.window(tag=menu_tag, no_title_bar=True, popup=True,
+                    pos=(int(mx), int(my)), no_move=True, no_resize=True,
+                    min_size=(1, 1), max_size=(300, 200)):
+        dpg.add_button(label="Refresh", width=120,
+                       callback=_ctx_refresh_repo, user_data=repo_key)
+
+
+def _ctx_refresh_repo(sender, app_data, user_data):
+    """Context-menu action: force-refresh a single repo."""
+    repo_key = user_data
+    if dpg.does_item_exist("repo_context_menu"):
+        dpg.delete_item("repo_context_menu")
+    rs = app.repos.get(repo_key)
+    if rs and rs.header_tag and dpg.does_item_exist(rs.header_tag):
+        old_label = dpg.get_item_label(rs.header_tag)
+        if not old_label.endswith(" ..."):
+            dpg.configure_item(rs.header_tag, label=old_label + "  ...")
+    executor.submit(bg_refresh_single_repo, repo_key, True)
 
 
 def cb_pause(sender, app_data):
@@ -1680,6 +1718,13 @@ def build_repo_section(rs, parent, label_width=0):
         parent=parent,
         default_open=change_count > 0 or rs.behind > 0 or rs.ahead > 0,
     )
+
+    repo_key = str(rs.path)
+    with dpg.item_handler_registry() as rclick_handler:
+        dpg.add_item_clicked_handler(button=dpg.mvMouseButton_Right,
+                                     callback=cb_repo_right_click,
+                                     user_data=repo_key)
+    dpg.bind_item_handler_registry(rs.header_tag, rclick_handler)
 
     # Show identity mismatch when effective name/email differs from global
     mismatch_parts = []
