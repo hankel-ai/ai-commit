@@ -503,15 +503,17 @@ def do_commit_and_push(cwd, message):
 def discover_repos(folder):
     """Return git repo paths to monitor.
 
-    If *folder* itself is a repo root, return just that.
-    Otherwise scan its direct children for repo roots.
+    Always include *folder* itself if it is a repo root, plus any direct
+    child directories that are repo roots. Supports the "umbrella" pattern
+    where a folder is its own repo (for loose files) and also contains
+    independent child repos.
     """
     folder = Path(folder).resolve()
     if not folder.is_dir():
         return []
-    if is_git_repo(folder):
-        return [folder]
     repos = []
+    if is_git_repo(folder):
+        repos.append(folder)
     for child in sorted(folder.iterdir()):
         if child.is_dir() and not child.name.startswith("."):
             if is_git_repo(child):
