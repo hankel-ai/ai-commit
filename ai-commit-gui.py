@@ -626,12 +626,17 @@ def bg_poll_repos(force=False):
         parent_is_repo = is_git_repo(folder_path)
         if parent_is_repo:
             repo_paths.append(folder_path)
+        candidate_non_git = []
+        git_child_count = 0
         for child in sorted(folder_path.iterdir()):
             if child.is_dir() and not child.name.startswith("."):
                 if is_git_repo(child):
                     repo_paths.append(child)
-                elif not parent_is_repo:
-                    non_git_paths.append(child)
+                    git_child_count += 1
+                else:
+                    candidate_non_git.append(child)
+        if (not parent_is_repo) or git_child_count > 0:
+            non_git_paths.extend(candidate_non_git)
         for rp in repo_paths:
             repo_key = str(rp)
             ui_queue.put(("repo_loading", repo_key, rp.name))
