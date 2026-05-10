@@ -357,7 +357,7 @@ def generate_message_ollama(diff, model, base_url):
         content = body["message"]["content"]
         if not content:
             raise OllamaError(
-                f"Model '{model}' returned empty content — it may have used "
+                f"Model '{model}' returned empty content - it may have used "
                 "thinking/tool-call mode instead of a plain text response."
             )
         return content.strip()

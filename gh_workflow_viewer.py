@@ -405,7 +405,7 @@ class Viewer:
         icon, color = _status_icon(status, conclusion)
         text = f"{icon} {status}"
         if conclusion:
-            text += f" — {conclusion}"
+            text += f" - {conclusion}"
         for r in self.runs:
             if r.id == run_id:
                 if r.head_branch:
@@ -466,7 +466,7 @@ class Viewer:
 
         placeholder = ""
         if step.status == "in_progress":
-            placeholder = "(running — logs appear when step completes)"
+            placeholder = "(running - logs appear when step completes)"
         elif step.status == "queued":
             placeholder = "(queued)"
 
@@ -503,7 +503,7 @@ class Viewer:
         if step.status == "in_progress" and w["status"] != "in_progress":
             lt = w["log_tag"]
             if dpg.does_item_exist(lt) and not dpg.get_value(lt):
-                dpg.set_value(lt, "(running — logs appear when step completes)")
+                dpg.set_value(lt, "(running - logs appear when step completes)")
 
         w["status"] = step.status
         w["conclusion"] = step.conclusion

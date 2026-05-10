@@ -1267,7 +1267,7 @@ def _show_create_remote_popup(repo_key, accounts, active_account,
                 default_value=default_acct, width=-1,
             )
         else:
-            dpg.add_text("No accounts found — add one above.",
+            dpg.add_text("No accounts found - add one above.",
                          color=COL_DIM)
             dpg.add_combo([], tag=combo_tag, width=-1)
         dpg.add_spacer(height=6)
@@ -1592,7 +1592,7 @@ def _set_tray_alert(on):
         return
     if on and not _tray_alert_active:
         tray_icon.icon = _tray_icon_alert or _tray_icon_normal
-        tray_icon.title = "AI Commit Monitor — changes detected"
+        tray_icon.title = "AI Commit Monitor - changes detected"
         _tray_alert_active = True
     elif not on and _tray_alert_active:
         tray_icon.icon = _tray_icon_normal
@@ -1654,7 +1654,7 @@ def _rebuild_folders_ui():
         return
     dpg.delete_item("folders_container", children_only=True)
     if not app.watched_folders:
-        dpg.add_text("No folders — click Add Folder", color=COL_DIM,
+        dpg.add_text("No folders - click Add Folder", color=COL_DIM,
                       parent="folders_container")
         return
     for folder in app.watched_folders:
@@ -1758,11 +1758,11 @@ def build_repo_section(rs, parent, label_width=0):
 
         if rs.behind > 0:
             with dpg.group(horizontal=True, parent=rs.header_tag):
-                dpg.add_text(f"  !! {sync_text} — PULL BEFORE EDITING !!", color=COL_RED)
+                dpg.add_text(f"  !! {sync_text} - PULL BEFORE EDITING !!", color=COL_RED)
                 pull_btn = dpg.add_button(label="Preview Pull", callback=cb_preview_pull, user_data=repo_key)
                 dpg.bind_item_theme(pull_btn, pull_btn_theme)
         else:
-            dpg.add_text(f"  !! {sync_text} — PUSH REQUIRED !!", color=COL_RED, parent=rs.header_tag)
+            dpg.add_text(f"  !! {sync_text} - PUSH REQUIRED !!", color=COL_RED, parent=rs.header_tag)
 
     # Folder name mismatch warning
     if rs.folder_name != rs.name:
@@ -1795,7 +1795,7 @@ def build_repo_section(rs, parent, label_width=0):
     # Full latest commit message on its own line
     if rs.last_commit_msg:
         if rs.last_commit_date:
-            full_commit_text = f"  latest: {rs.last_commit_msg} — {rs.last_commit_date}"
+            full_commit_text = f"  latest: {rs.last_commit_msg} - {rs.last_commit_date}"
         else:
             full_commit_text = f"  latest: {rs.last_commit_msg}"
         dpg.add_text(full_commit_text, color=COL_DIM, parent=rs.header_tag, wrap=0)
@@ -2419,11 +2419,11 @@ def process_queue():
             rs = app.repos.get(repo_name)
             if rs and rs.status_tag and dpg.does_item_exist(rs.status_tag):
                 if reason == "no_runs":
-                    text = "Pushed — no Actions runs triggered for this commit"
+                    text = "Pushed - no Actions runs triggered for this commit"
                 elif reason == "no_token":
-                    text = "Pushed — Actions check skipped (no gh CLI token)"
+                    text = "Pushed - Actions check skipped (no gh CLI token)"
                 elif reason == "no_remote":
-                    text = "Pushed — Actions check skipped (no remote/SHA)"
+                    text = "Pushed - Actions check skipped (no remote/SHA)"
                 else:
                     text = ""
                 if text:
@@ -2545,7 +2545,7 @@ def process_queue():
                     repo_key = str(rs.path)
                     win_tag = dpg.generate_uuid()
                     with dpg.window(
-                        label=f"Incoming changes — {rs.name}",
+                        label=f"Incoming changes - {rs.name}",
                         tag=win_tag,
                         width=620, height=420,
                         no_collapse=True,
