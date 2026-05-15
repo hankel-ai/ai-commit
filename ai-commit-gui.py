@@ -2308,6 +2308,24 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False):
         for key, info in non_git_results.items():
             new_non_git[key] = NonGitFolder(path=info["path"], name=info["name"])
 
+    # Disambiguate duplicate display names across both git repos and non-git
+    # folders by prefixing with the parent folder name (e.g. "ClaudeCode/foo").
+    # Same prefix is applied to folder_name so the folder/repo-name mismatch
+    # marker keeps working correctly.
+    name_counts = {}
+    for rs in new_repos.values():
+        name_counts[rs.name] = name_counts.get(rs.name, 0) + 1
+    for ngf in new_non_git.values():
+        name_counts[ngf.name] = name_counts.get(ngf.name, 0) + 1
+    for rs in new_repos.values():
+        if name_counts.get(rs.name, 0) > 1:
+            prefix = f"{rs.path.parent.name}/"
+            rs.name = prefix + rs.name
+            rs.folder_name = prefix + rs.folder_name
+    for ngf in new_non_git.values():
+        if name_counts.get(ngf.name, 0) > 1:
+            ngf.name = f"{ngf.path.parent.name}/{ngf.name}"
+
     # Compute max base-label width so dates right-align
     label_width = max((len(_repo_base_label(rs)) for rs in new_repos.values()), default=0)
 
