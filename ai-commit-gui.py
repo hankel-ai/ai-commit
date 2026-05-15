@@ -636,7 +636,12 @@ def bg_poll_repos(force=False):
                     git_child_count += 1
                 else:
                     candidate_non_git.append(child)
-        if (not parent_is_repo) or git_child_count > 0:
+        if not parent_is_repo and git_child_count == 0:
+            # Watched folder itself isn't git and has no git children — surface
+            # the folder itself so it can be Init'd. Don't list its subfolders;
+            # they'd just become part of that single new repo.
+            non_git_paths.append(folder_path)
+        elif (not parent_is_repo) or git_child_count > 0:
             non_git_paths.extend(candidate_non_git)
         for rp in repo_paths:
             repo_key = str(rp)

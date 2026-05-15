@@ -68,6 +68,7 @@ python ai-commit-gui.py --model mistral --poll 15
 - **Always-on-top**: compact window stays visible while you work
 - **Drag-to-move**: custom title bar with drag support
 - **GitHub Actions viewer**: after pushing, automatically detects any triggered workflow runs and opens a live status window with per-step logs, run cancellation, and direct GitHub links
+- **Init non-git folders**: with "Show non-git folders" enabled, any watched folder that isn't a git repo gets an `Init` button. This includes the folder you added directly (when it has no git sub-folders), and non-git siblings of existing repos inside a container folder
 
 ## Options
 

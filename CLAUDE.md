@@ -31,13 +31,7 @@ Default model: `qwen3-coder:480b-cloud` (configurable via settings or `AI_COMMIT
 
 ## Deploy
 
-**After every code change, run `deploy.cmd` to copy to the production location:**
-
-```bash
-cmd.exe /c "cd /d C:\Users\admin\OneDrive\ClaudeCode\ai-commit && deploy.cmd"
-```
-
-This robocopy's the project to `%USERPROFILE%\OneDrive\Programs\ai-commit` (where the startup shortcut points). Always deploy after making changes.
+`deploy.cmd` robocopies the project to `%USERPROFILE%\OneDrive\Programs\ai-commit` (where the startup shortcut points). **The user runs this manually — never invoke it from Claude Code.**
 
 ## Run / Build
 
