@@ -1440,6 +1440,138 @@ def cb_close_preview(sender, app_data, user_data):
         dpg.delete_item(user_data)
 
 
+def cb_clean_preview(sender, app_data, user_data):
+    """Run git clean -nd to preview what would be removed."""
+    repo_key = user_data
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    if rs.status_tag and dpg.does_item_exist(rs.status_tag):
+        dpg.set_value(rs.status_tag, "Checking for files to clean...")
+        dpg.configure_item(rs.status_tag, color=COL_YELLOW)
+    executor.submit(bg_clean_preview, repo_key)
+
+
+def _run_git_no_stdin(args, cwd):
+    """Run a git command with stdin closed so interactive prompts get EOF."""
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    result = subprocess.run(
+        ["git"] + args,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdin=subprocess.DEVNULL,
+        **kwargs,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+def bg_clean_preview(repo_key):
+    """Run git clean -nd. Posts result to ui_queue."""
+    try:
+        rc, stdout, stderr = _run_git_no_stdin(["clean", "-nd"], cwd=repo_key)
+        if rc != 0:
+            ui_queue.put(("clean_preview_result", repo_key, False,
+                          stderr.strip() or "git clean failed"))
+        else:
+            ui_queue.put(("clean_preview_result", repo_key, True, stdout))
+    except Exception as exc:
+        ui_queue.put(("clean_preview_result", repo_key, False, str(exc)))
+
+
+def cb_confirm_clean(sender, app_data, user_data):
+    """User confirmed clean from the preview window."""
+    repo_key, win_tag = user_data
+    if dpg.does_item_exist(win_tag):
+        dpg.delete_item(win_tag)
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    if rs.status_tag and dpg.does_item_exist(rs.status_tag):
+        dpg.set_value(rs.status_tag, "Cleaning...")
+        dpg.configure_item(rs.status_tag, color=COL_YELLOW)
+    executor.submit(bg_clean_confirm, repo_key)
+
+
+def cb_close_clean_preview(sender, app_data, user_data):
+    """Close clean preview window without cleaning."""
+    if dpg.does_item_exist(user_data):
+        dpg.delete_item(user_data)
+
+
+def _shell_delete(path):
+    """Delete a file or directory via the Windows Shell API (same as Explorer).
+
+    Falls back to shutil/os on non-Windows.
+    """
+    if sys.platform == "win32":
+        import ctypes.wintypes
+
+        class SHFILEOPSTRUCTW(ctypes.Structure):
+            _fields_ = [
+                ("hwnd", ctypes.wintypes.HWND),
+                ("wFunc", ctypes.c_uint),
+                ("pFrom", ctypes.c_wchar_p),
+                ("pTo", ctypes.c_wchar_p),
+                ("fFlags", ctypes.c_ushort),
+                ("fAnyOperationsAborted", ctypes.wintypes.BOOL),
+                ("hNameMappings", ctypes.c_void_p),
+                ("lpszProgressTitle", ctypes.c_wchar_p),
+            ]
+
+        FO_DELETE = 0x0003
+        FOF_SILENT = 0x0004
+        FOF_NOCONFIRMATION = 0x0010
+        FOF_NOERRORUI = 0x0400
+
+        op = SHFILEOPSTRUCTW()
+        op.hwnd = 0
+        op.wFunc = FO_DELETE
+        op.pFrom = str(path) + "\0"
+        op.pTo = None
+        op.fFlags = FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI
+        result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+        if result != 0:
+            raise OSError(f"SHFileOperation error code 0x{result:04X}")
+    else:
+        p = Path(path)
+        if p.is_dir():
+            shutil.rmtree(p)
+        else:
+            p.unlink()
+
+
+def bg_clean_confirm(repo_key):
+    """Delete untracked files/dirs via Windows Shell API (same mechanism as Explorer)."""
+    try:
+        rc, stdout, _ = _run_git_no_stdin(["clean", "-nd"], cwd=repo_key)
+        if rc != 0:
+            ui_queue.put(("clean_result", repo_key, False, [], ["git clean -nd failed"]))
+            return
+        removed = []
+        errors = []
+        repo_path = Path(repo_key)
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("Would remove "):
+                continue
+            rel = line[len("Would remove "):]
+            target = repo_path / rel
+            try:
+                _shell_delete(target)
+                removed.append(f"Removing {rel}")
+            except Exception as exc:
+                errors.append(f"Failed to remove {rel}: {exc}")
+        ok = not errors
+        ui_queue.put(("clean_result", repo_key, ok, removed, errors))
+    except Exception as exc:
+        ui_queue.put(("clean_result", repo_key, False, [], [str(exc)]))
+
+
 def cb_gitignore(sender, app_data, user_data):
     """Add a file or folder to the repo's .gitignore and refresh."""
     repo_key, filepath = user_data
@@ -1788,6 +1920,10 @@ def build_repo_section(rs, parent, label_width=0):
             label="Folder",
             callback=cb_open_folder, user_data=str(rs.path))
         dpg.bind_item_theme(folder_btn, link_btn_theme)
+        clean_btn = dpg.add_button(
+            label="Clean",
+            callback=cb_clean_preview, user_data=str(rs.path))
+        dpg.bind_item_theme(clean_btn, link_btn_theme)
         if rs.remote_url:
             btn = dpg.add_button(label="GitHub", callback=cb_open_repo_url, user_data=rs.remote_url)
             dpg.bind_item_theme(btn, link_btn_theme)
@@ -2619,6 +2755,120 @@ def process_queue():
                 else:
                     dpg.set_value(rs.status_tag, f"Pull failed: {detail}")
                     dpg.configure_item(rs.status_tag, color=COL_RED)
+
+        elif kind == "clean_preview_result":
+            _, repo_name, ok, output = msg
+            rs = app.repos.get(repo_name)
+            if rs and rs.status_tag and dpg.does_item_exist(rs.status_tag):
+                if not ok:
+                    dpg.set_value(rs.status_tag, f"Clean preview failed: {output}")
+                    dpg.configure_item(rs.status_tag, color=COL_RED)
+                elif not output.strip():
+                    dpg.set_value(rs.status_tag, "Already clean - nothing to remove")
+                    dpg.configure_item(rs.status_tag, color=COL_GREEN)
+                    threading.Timer(
+                        2.5,
+                        lambda r=repo_name: ui_queue.put(("clean_clear_status", r)),
+                    ).start()
+                else:
+                    dpg.set_value(rs.status_tag, "Clean preview ready")
+                    dpg.configure_item(rs.status_tag, color=COL_GREEN)
+                    repo_key = str(rs.path)
+                    win_tag = dpg.generate_uuid()
+                    with dpg.window(
+                        label=f"Clean preview - {rs.name}",
+                        tag=win_tag,
+                        width=620, height=420,
+                        no_collapse=True,
+                        on_close=lambda s, a, u: (
+                            dpg.delete_item(s) if dpg.does_item_exist(s) else None
+                        ),
+                    ):
+                        dpg.add_text(
+                            "These untracked files/folders would be removed by 'git clean -fd':",
+                            color=COL_ACCENT,
+                        )
+                        dpg.add_input_text(
+                            default_value=output,
+                            multiline=True, readonly=True,
+                            width=-1, height=280,
+                        )
+                        dpg.add_spacer(height=6)
+                        dpg.add_text("This action cannot be undone.", color=COL_RED)
+                        dpg.add_spacer(height=6)
+                        with dpg.group(horizontal=True):
+                            clean_btn = dpg.add_button(
+                                label="Clean Now",
+                                callback=cb_confirm_clean,
+                                user_data=(repo_key, win_tag),
+                            )
+                            dpg.bind_item_theme(clean_btn, pull_btn_theme)
+                            dpg.add_button(
+                                label="Cancel",
+                                callback=cb_close_clean_preview,
+                                user_data=win_tag,
+                            )
+
+        elif kind == "clean_clear_status":
+            _, repo_name = msg
+            rs = app.repos.get(repo_name)
+            if rs and rs.status_tag and dpg.does_item_exist(rs.status_tag):
+                update_repo_status(rs)
+
+        elif kind == "clean_result":
+            _, repo_name, ok, removed, errors = msg
+            rs = app.repos.get(repo_name)
+            trigger_poll()
+            if rs and rs.status_tag and dpg.does_item_exist(rs.status_tag):
+                if ok:
+                    n = len(removed)
+                    dpg.set_value(rs.status_tag, f"Removed {n} item{'s' if n != 1 else ''}")
+                    dpg.configure_item(rs.status_tag, color=COL_GREEN)
+                else:
+                    dpg.set_value(
+                        rs.status_tag,
+                        f"Clean: removed {len(removed)}, {len(errors)} failed",
+                    )
+                    dpg.configure_item(rs.status_tag, color=COL_RED)
+                    win_tag = dpg.generate_uuid()
+                    with dpg.window(
+                        label=f"Clean result - {rs.name}",
+                        tag=win_tag,
+                        width=620, height=420,
+                        no_collapse=True,
+                        on_close=lambda s, a, u: (
+                            dpg.delete_item(s) if dpg.does_item_exist(s) else None
+                        ),
+                    ):
+                        if removed:
+                            dpg.add_text(
+                                f"Removed ({len(removed)}):", color=COL_GREEN)
+                            dpg.add_input_text(
+                                default_value="\n".join(removed),
+                                multiline=True, readonly=True,
+                                width=-1, height=140,
+                            )
+                            dpg.add_spacer(height=6)
+                        if errors:
+                            dpg.add_text(
+                                f"Failed ({len(errors)}):", color=COL_RED)
+                            dpg.add_input_text(
+                                default_value="\n".join(errors),
+                                multiline=True, readonly=True,
+                                width=-1, height=140,
+                            )
+                            dpg.add_spacer(height=6)
+                            dpg.add_text(
+                                "Tip: 'Permission denied' usually means a process holds an "
+                                "open handle (dev server, editor, OneDrive). Close it and retry.",
+                                color=COL_DIM, wrap=580,
+                            )
+                        dpg.add_spacer(height=6)
+                        dpg.add_button(
+                            label="Close",
+                            callback=cb_close_clean_preview,
+                            user_data=win_tag,
+                        )
 
         elif kind == "folder_selected":
             chosen = msg[1]
