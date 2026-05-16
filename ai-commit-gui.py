@@ -1667,7 +1667,10 @@ def _rebuild_folders_ui():
             rm = dpg.add_button(label="x", callback=cb_remove_folder,
                                 user_data=str(folder))
             dpg.bind_item_theme(rm, remove_btn_theme)
-            dpg.add_text(str(folder), color=COL_DIM)
+            link = dpg.add_button(label=str(folder),
+                                  callback=cb_open_folder,
+                                  user_data=str(folder))
+            dpg.bind_item_theme(link, link_btn_theme)
 
 
 def update_repo_status(rs):
