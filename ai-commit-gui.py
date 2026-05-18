@@ -555,7 +555,6 @@ def _show_window():
         _user32.ShowWindow(_hwnd, 5)  # SW_SHOW
         _user32.SetForegroundWindow(_hwnd)
         _window_hidden = False
-        _set_tray_alert(False)  # clear indicator
         if app.always_on_top:
             _set_topmost(True)
 
@@ -2506,9 +2505,9 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False):
                 update_repo_status(rs)
                 executor.submit(bg_generate_message, name)
 
-    # Update tray alert based on whether any repos have changes
-    if _window_hidden:
-        _set_tray_alert(any_changes)
+    # Update tray alert based on whether any repos have changes,
+    # regardless of whether the main window is visible.
+    _set_tray_alert(any_changes)
 
 
 # ---------------------------------------------------------------------------
