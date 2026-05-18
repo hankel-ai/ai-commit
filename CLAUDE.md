@@ -26,7 +26,7 @@ Default model: `qwen3-coder:480b-cloud` (configurable via settings or `AI_COMMIT
 | `ai_commit_core.py` | Shared logic: git ops, diff generation, AI provider calls, config defaults |
 | `gh_workflows.py` | GitHub Actions API client: run detection, job/step polling, log fetching, run cancellation |
 | `gh_workflow_viewer.py` | Standalone workflow viewer (separate OS window, launched as subprocess via `pythonw.exe`) |
-| `ai-commit-gui-settings.json` | Persisted GUI settings (window pos, provider, model, watched folders) |
+| `ai-commit-gui-settings.json` | Persisted GUI settings (window pos, provider, model, ollama_url, watched folders) |
 | `requirements.txt` | Python dependencies |
 
 ## Deploy

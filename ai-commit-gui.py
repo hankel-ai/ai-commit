@@ -349,6 +349,7 @@ def _save_settings():
             "poll_interval": app.poll_interval,
             "model": app.model,
             "provider": app.provider,
+            "ollama_url": app.ollama_url,
             "watched_folders": [str(f) for f in app.watched_folders],
             "actions_popup_enabled": app.actions_popup_enabled,
             "show_non_git_folders": app.show_non_git_folders,
@@ -1151,7 +1152,7 @@ def cb_open_settings(sender, app_data):
     with dpg.window(
         label="Settings",
         tag=win_tag,
-        width=340, height=360,
+        width=340, height=400,
         no_collapse=True,
         on_close=lambda s, a, u: (
             dpg.delete_item(s) if dpg.does_item_exist(s) else None
@@ -1180,18 +1181,29 @@ def cb_open_settings(sender, app_data):
                              default_value=_is_startup_enabled(),
                              callback=cb_start_with_windows)
         dpg.add_spacer(height=6)
+        dpg.add_text("Provider", color=COL_ACCENT)
+        with dpg.group(horizontal=True):
+            dpg.add_text("Ollama URL:", color=COL_DIM)
+            dpg.add_input_text(tag="settings_ollama_url",
+                               default_value=app.ollama_url, width=-1,
+                               callback=cb_ollama_url_changed, on_enter=True,
+                               hint="http://localhost:11434")
+        dpg.add_spacer(height=6)
         dpg.add_text("Display", color=COL_ACCENT)
         dpg.add_checkbox(label="Show non-git folders",
                          default_value=app.show_non_git_folders,
                          callback=cb_show_non_git)
         dpg.add_spacer(height=10)
-        save_btn = dpg.add_button(
-            label="Save & Close",
-            callback=lambda: (
-                _save_settings(),
-                dpg.delete_item("settings_window") if dpg.does_item_exist("settings_window") else None,
-            ),
-        )
+        def _save_and_close():
+            if dpg.does_item_exist("settings_ollama_url"):
+                val = dpg.get_value("settings_ollama_url").strip()
+                if val:
+                    app.ollama_url = val
+            _save_settings()
+            if dpg.does_item_exist("settings_window"):
+                dpg.delete_item("settings_window")
+
+        save_btn = dpg.add_button(label="Save & Close", callback=_save_and_close)
         dpg.bind_item_theme(save_btn, green_btn_theme)
 
 
@@ -1696,6 +1708,13 @@ def cb_model_reset(sender, app_data):
 
 def cb_provider_changed(sender, app_data):
     app.provider = dpg.get_value(sender)
+
+
+def cb_ollama_url_changed(sender, app_data):
+    val = dpg.get_value(sender).strip()
+    if val:
+        app.ollama_url = val
+        _save_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -2984,6 +3003,8 @@ def main():
             app.model = saved["model"]
         if "provider" in saved:
             app.provider = saved["provider"]
+        if "ollama_url" in saved:
+            app.ollama_url = saved["ollama_url"]
         app.actions_popup_enabled = saved.get("actions_popup_enabled", True)
         app.show_non_git_folders = saved.get("show_non_git_folders", True)
         if not folders_from_cli:
