@@ -294,6 +294,7 @@ class AppState:
     global_git_name: str = ""
     global_git_email: str = ""
     non_git_folders: dict = field(default_factory=dict)
+    repo_overrides: dict = field(default_factory=dict)  # repo_key -> "pause" or "active"
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +354,7 @@ def _save_settings():
             "watched_folders": [str(f) for f in app.watched_folders],
             "actions_popup_enabled": app.actions_popup_enabled,
             "show_non_git_folders": app.show_non_git_folders,
+            "repo_overrides": app.repo_overrides,
         }
         _SETTINGS_FILE.write_text(json.dumps(data))
     except Exception:
@@ -645,10 +647,32 @@ def bg_poll_repos(force=False):
             non_git_paths.extend(candidate_non_git)
         for rp in repo_paths:
             repo_key = str(rp)
+            repo_override = app.repo_overrides.get(repo_key, "")
+            existing = app.repos.get(repo_key)
+            skip_poll = (repo_override == "pause"
+                         or (app.paused and repo_override != "active"))
+            if skip_poll and existing:
+                results[repo_key] = {
+                    "path": rp,
+                    "entries": existing.entries,
+                    "remote_url": existing.remote_url,
+                    "git_user": existing.git_user,
+                    "github_account": existing.github_account,
+                    "visibility": existing.visibility,
+                    "local_name": existing.local_name,
+                    "local_email": existing.local_email,
+                    "effective_name": existing.effective_name,
+                    "effective_email": existing.effective_email,
+                    "branch": existing.branch,
+                    "last_commit_msg": existing.last_commit_msg,
+                    "last_commit_date": existing.last_commit_date,
+                    "ahead": existing.ahead,
+                    "behind": existing.behind,
+                }
+                continue
             ui_queue.put(("repo_loading", repo_key, rp.name))
             entries = get_status(rp)
             last_msg, last_date = get_last_commit(rp)
-            existing = app.repos.get(repo_key)
             is_new = existing is None
             if not force and existing and existing.remote_url:
                 remote_url = existing.remote_url
@@ -1078,11 +1102,32 @@ def cb_repo_right_click(sender, app_data, user_data):
     if dpg.does_item_exist(menu_tag):
         dpg.delete_item(menu_tag)
     mx, my = dpg.get_mouse_pos(local=False)
+    current = app.repo_overrides.get(repo_key, "")
+    pause_label = "Remove Force Pause" if current == "pause" else "Force Pause"
+    active_label = "Remove Force Active" if current == "active" else "Force Active"
     with dpg.window(tag=menu_tag, no_title_bar=True, popup=True,
                     pos=(int(mx), int(my)), no_move=True, no_resize=True,
                     min_size=(1, 1), max_size=(300, 200)):
-        dpg.add_button(label="Refresh", width=120,
+        dpg.add_button(label="Refresh", width=160,
                        callback=_ctx_refresh_repo, user_data=repo_key)
+        dpg.add_button(label=pause_label, width=160,
+                       callback=_ctx_toggle_force, user_data=(repo_key, "pause"))
+        dpg.add_button(label=active_label, width=160,
+                       callback=_ctx_toggle_force, user_data=(repo_key, "active"))
+
+
+def _ctx_toggle_force(sender, app_data, user_data):
+    """Context-menu action: toggle force-pause or force-active for a repo."""
+    repo_key, mode = user_data
+    if dpg.does_item_exist("repo_context_menu"):
+        dpg.delete_item("repo_context_menu")
+    current = app.repo_overrides.get(repo_key, "")
+    if current == mode:
+        app.repo_overrides.pop(repo_key, None)
+    else:
+        app.repo_overrides[repo_key] = mode
+    _save_settings()
+    executor.submit(bg_refresh_single_repo, repo_key, True)
 
 
 def _ctx_refresh_repo(sender, app_data, user_data):
@@ -1794,9 +1839,13 @@ def setup_tray():
 
 def trigger_poll(force=False):
     app.last_poll = time.time()
-    # Immediately mark all existing repos as loading in the UI
-    for rs in app.repos.values():
+    for repo_key, rs in app.repos.items():
         if rs.header_tag and dpg.does_item_exist(rs.header_tag):
+            override = app.repo_overrides.get(repo_key, "")
+            skip = (override == "pause"
+                    or (app.paused and override != "active"))
+            if skip:
+                continue
             old_label = dpg.get_item_label(rs.header_tag)
             if not old_label.endswith(" ..."):
                 dpg.configure_item(rs.header_tag, label=old_label + "  ...")
@@ -1880,18 +1929,31 @@ def build_repo_section(rs, parent, label_width=0):
         pad = max(0, label_width - len(label))
         label += " " * pad + "  " + " ".join(right_parts)
 
+    repo_key = str(rs.path)
+    override = app.repo_overrides.get(repo_key, "")
+    has_activity = change_count > 0 or rs.behind > 0 or rs.ahead > 0
+    if override == "pause":
+        should_open = False
+    elif app.paused and override != "active":
+        should_open = False
+    else:
+        should_open = has_activity
+
     rs.header_tag = dpg.add_collapsing_header(
         label=label,
         parent=parent,
-        default_open=change_count > 0 or rs.behind > 0 or rs.ahead > 0,
+        default_open=should_open,
     )
-
-    repo_key = str(rs.path)
     with dpg.item_handler_registry() as rclick_handler:
         dpg.add_item_clicked_handler(button=dpg.mvMouseButton_Right,
                                      callback=cb_repo_right_click,
                                      user_data=repo_key)
     dpg.bind_item_handler_registry(rs.header_tag, rclick_handler)
+
+    if override == "pause":
+        dpg.bind_item_theme(rs.header_tag, "force_pause_header_theme")
+    elif override == "active":
+        dpg.bind_item_theme(rs.header_tag, "force_active_header_theme")
 
     # Show identity mismatch when effective name/email differs from global
     mismatch_parts = []
@@ -3006,6 +3068,7 @@ def main():
             app.ollama_url = saved["ollama_url"]
         app.actions_popup_enabled = saved.get("actions_popup_enabled", True)
         app.show_non_git_folders = saved.get("show_non_git_folders", True)
+        app.repo_overrides = saved.get("repo_overrides", {})
         if not folders_from_cli:
             # Support new list format and migrate old single-folder format
             saved_folders = saved.get("watched_folders", [])
@@ -3070,6 +3133,20 @@ def main():
             dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (200, 60, 60))
             dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (220, 80, 80))
             dpg.add_theme_color(dpg.mvThemeCol_Text, (255, 255, 255))
+
+    # Force-pause header theme (red-tinted)
+    with dpg.theme(tag="force_pause_header_theme"):
+        with dpg.theme_component(dpg.mvCollapsingHeader):
+            dpg.add_theme_color(dpg.mvThemeCol_Header, (80, 30, 30))
+            dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (95, 40, 40))
+            dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (110, 50, 50))
+
+    # Force-active header theme (green-tinted)
+    with dpg.theme(tag="force_active_header_theme"):
+        with dpg.theme_component(dpg.mvCollapsingHeader):
+            dpg.add_theme_color(dpg.mvThemeCol_Header, (30, 65, 40))
+            dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (40, 78, 50))
+            dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (50, 90, 60))
 
     # Small remove-button theme (red text, no background)
     with dpg.theme() as remove_btn_theme:
@@ -3183,7 +3260,8 @@ def main():
             _hide_window()
 
         now = time.time()
-        if not app.paused and now - app.last_poll >= app.poll_interval:
+        has_force_active = any(v == "active" for v in app.repo_overrides.values())
+        if (not app.paused or has_force_active) and now - app.last_poll >= app.poll_interval:
             trigger_poll()
 
         dpg.render_dearpygui_frame()
