@@ -651,7 +651,7 @@ def bg_poll_repos(force=False):
             repo_override = app.repo_overrides.get(repo_key, "")
             existing = app.repos.get(repo_key)
             skip_poll = (repo_override == "pause"
-                         or (app.paused and repo_override != "active"))
+                         or (not force and app.paused and repo_override != "active"))
             if skip_poll and existing:
                 results[repo_key] = {
                     "path": rp,
@@ -1129,7 +1129,7 @@ def cb_repo_right_click(sender, app_data, user_data):
         dpg.delete_item(menu_tag)
     mx, my = dpg.get_mouse_pos(local=False)
     current = app.repo_overrides.get(repo_key, "")
-    pause_label = "Remove Force Pause" if current == "pause" else "Force Pause"
+    pause_label = "Remove Force Paused" if current == "pause" else "Force Paused"
     active_label = "Remove Force Active" if current == "active" else "Force Active"
     with dpg.window(tag=menu_tag, no_title_bar=True, popup=True,
                     pos=(int(mx), int(my)), no_move=True, no_resize=True,
@@ -1869,7 +1869,7 @@ def trigger_poll(force=False):
         if rs.header_tag and dpg.does_item_exist(rs.header_tag):
             override = app.repo_overrides.get(repo_key, "")
             skip = (override == "pause"
-                    or (app.paused and override != "active"))
+                    or (not force and app.paused and override != "active"))
             if skip:
                 continue
             old_label = dpg.get_item_label(rs.header_tag)
