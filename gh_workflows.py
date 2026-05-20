@@ -183,6 +183,63 @@ def detect_runs_for_commit(owner, repo, sha, token, *,
     return runs
 
 
+def detect_runs_for_dispatch(owner, repo, workflow_id, token, after_iso, *,
+                             timeout=45, poll_interval=2.0, cancel_event=None):
+    """Poll until workflow_dispatch runs of `workflow_id` appear after `after_iso`.
+
+    `after_iso` is an ISO-8601 UTC timestamp (e.g. "2026-05-19T12:00:00Z")
+    captured just before `gh workflow run` was invoked; runs with
+    `created_at >= after_iso` are considered ours.
+    """
+    deadline = time.monotonic() + timeout
+    seen_ids = set()
+    runs = []
+    settle_polls = 0
+
+    while time.monotonic() < deadline:
+        if cancel_event and cancel_event.is_set():
+            return runs
+
+        try:
+            data = _api_get(
+                f"/repos/{owner}/{repo}/actions/workflows/{workflow_id}"
+                f"/runs?event=workflow_dispatch&per_page=20",
+                token,
+            )
+        except (urllib.error.URLError, OSError):
+            time.sleep(poll_interval)
+            continue
+
+        for wr in data.get("workflow_runs", []):
+            created = wr.get("created_at", "")
+            if created < after_iso:
+                continue
+            if wr["id"] in seen_ids:
+                continue
+            seen_ids.add(wr["id"])
+            runs.append(Run(
+                id=wr["id"],
+                name=wr.get("name", wr.get("display_title", "")),
+                status=wr["status"],
+                conclusion=wr.get("conclusion"),
+                html_url=wr["html_url"],
+                jobs_url=wr["jobs_url"],
+                head_branch=wr.get("head_branch", ""),
+                run_number=wr.get("run_number", 0),
+                created_at=created,
+                workflow_name=wr.get("name", ""),
+            ))
+
+        if runs:
+            settle_polls += 1
+            if settle_polls >= 3:
+                return runs
+
+        time.sleep(poll_interval)
+
+    return runs
+
+
 def fetch_jobs(owner, repo, run_id, token):
     """Fetch jobs and steps for a given run. Returns list of Job."""
     try:

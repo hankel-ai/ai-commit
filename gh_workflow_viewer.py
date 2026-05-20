@@ -19,8 +19,8 @@ import dearpygui.dearpygui as dpg
 
 from gh_workflows import (
     Run, _api_get, cancel_run, detect_runs_for_commit,
-    fetch_job_log, fetch_jobs, fetch_run_logs_zip,
-    parse_job_log_with_steps,
+    detect_runs_for_dispatch, fetch_job_log, fetch_jobs,
+    fetch_run_logs_zip, parse_job_log_with_steps,
 )
 
 # ---------------------------------------------------------------------------
@@ -73,12 +73,17 @@ def _elapsed(started_at, completed_at=None):
 # ---------------------------------------------------------------------------
 
 class Viewer:
-    def __init__(self, owner, repo, sha, token):
+    def __init__(self, owner, repo, token, *, sha=None,
+                 workflow_id=None, workflow_name=None, after_iso=None):
         self.owner = owner
         self.repo = repo
-        self.sha = sha
-        self.sha_short = sha[:7] if len(sha) > 7 else sha
         self.token = token
+        self.sha = sha or ""
+        self.sha_short = self.sha[:7] if len(self.sha) > 7 else self.sha
+        self.workflow_id = workflow_id
+        self.workflow_name = workflow_name or ""
+        self.after_iso = after_iso or ""
+        self.mode = "dispatch" if workflow_id else "commit"
 
         self.ui_queue = queue.Queue()
         self.stop_event = threading.Event()
@@ -95,8 +100,12 @@ class Viewer:
         dpg.create_context()
         self._create_theme()
 
-        title = (f"GitHub Actions - {self.owner}/{self.repo}"
-                 f" @ {self.sha_short}")
+        if self.mode == "dispatch":
+            title = (f"GitHub Actions - {self.owner}/{self.repo}"
+                     f" - {self.workflow_name or 'dispatch'}")
+        else:
+            title = (f"GitHub Actions - {self.owner}/{self.repo}"
+                     f" @ {self.sha_short}")
         vp_kwargs = dict(
             title=title, width=900, height=640,
             min_width=500, min_height=300,
@@ -177,10 +186,16 @@ class Viewer:
     # -- background polling -------------------------------------------------
 
     def _poll_loop(self):
-        runs = detect_runs_for_commit(
-            self.owner, self.repo, self.sha, self.token,
-            cancel_event=self.stop_event,
-        )
+        if self.mode == "dispatch":
+            runs = detect_runs_for_dispatch(
+                self.owner, self.repo, self.workflow_id, self.token,
+                self.after_iso, cancel_event=self.stop_event,
+            )
+        else:
+            runs = detect_runs_for_commit(
+                self.owner, self.repo, self.sha, self.token,
+                cancel_event=self.stop_event,
+            )
         if self.stop_event.is_set():
             return
         if not runs:
@@ -310,10 +325,12 @@ class Viewer:
             kind = msg[0]
 
             if kind == "no_runs":
-                dpg.set_value(
-                    self._status_tag,
-                    "No workflow runs triggered by this commit.",
+                msg_text = (
+                    "No workflow runs found for this dispatch yet."
+                    if self.mode == "dispatch"
+                    else "No workflow runs triggered by this commit."
                 )
+                dpg.set_value(self._status_tag, msg_text)
                 dpg.configure_item(self._status_tag, color=COL_DIM)
 
             elif kind == "runs_found":
@@ -552,8 +569,11 @@ def main():
     viewer = Viewer(
         owner=data["owner"],
         repo=data["repo"],
-        sha=data["sha"],
         token=data["token"],
+        sha=data.get("sha"),
+        workflow_id=data.get("workflow_id"),
+        workflow_name=data.get("workflow_name"),
+        after_iso=data.get("after_iso"),
     )
     viewer.run()
 

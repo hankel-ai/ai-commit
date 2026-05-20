@@ -14,6 +14,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from enum import Enum, auto
 from pathlib import Path
 
@@ -810,6 +811,23 @@ def bg_preview_pull(repo_name):
         ui_queue.put(("preview_pull_result", repo_name, "", str(exc)))
 
 
+def _spawn_viewer_process(payload):
+    """Write payload to a temp JSON file and launch gh_workflow_viewer.py."""
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False,
+        dir=tempfile.gettempdir(),
+    )
+    json.dump(payload, tmp)
+    tmp.close()
+    viewer = str(Path(__file__).resolve().parent / "gh_workflow_viewer.py")
+    exe = sys.executable
+    if sys.platform == "win32" and exe.lower().endswith("python.exe"):
+        pw = exe[:-len("python.exe")] + "pythonw.exe"
+        if os.path.isfile(pw):
+            exe = pw
+    subprocess.Popen([exe, viewer, tmp.name])
+
+
 def _launch_workflow_viewer(repo_name, rs):
     """Check for workflow runs, then launch viewer only if any exist.
 
@@ -832,20 +850,28 @@ def _launch_workflow_viewer(repo_name, rs):
         ui_queue.put(("workflow_check", repo_name, "no_runs"))
         return
 
-    data = {"owner": owner, "repo": repo, "sha": sha, "token": token}
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False,
-        dir=tempfile.gettempdir(),
-    )
-    json.dump(data, tmp)
-    tmp.close()
-    viewer = str(Path(__file__).resolve().parent / "gh_workflow_viewer.py")
-    exe = sys.executable
-    if sys.platform == "win32" and exe.lower().endswith("python.exe"):
-        pw = exe[:-len("python.exe")] + "pythonw.exe"
-        if os.path.isfile(pw):
-            exe = pw
-    subprocess.Popen([exe, viewer, tmp.name])
+    _spawn_viewer_process({
+        "owner": owner, "repo": repo, "sha": sha, "token": token,
+    })
+
+
+def _launch_workflow_viewer_dispatch(repo_name, wf_id, wf_name, after_iso):
+    """Launch viewer in dispatch mode for a freshly dispatched workflow."""
+    rs = app.repos.get(repo_name)
+    if not rs or not rs.remote_url:
+        return
+    token = get_gh_token()
+    if not token:
+        return
+    owner, repo = parse_owner_repo(rs.remote_url)
+    if not owner or not repo:
+        return
+
+    _spawn_viewer_process({
+        "owner": owner, "repo": repo, "token": token,
+        "workflow_id": wf_id, "workflow_name": wf_name,
+        "after_iso": after_iso,
+    })
 
 
 def bg_commit_and_push(repo_name, message):
@@ -2381,6 +2407,11 @@ def bg_dispatch_workflow(repo_key, wf_id, wf_name):
         kwargs = {}
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+        # Captured before dispatch so any run created at/after this moment
+        # is ours; small backoff covers clock skew vs GitHub.
+        after_iso = (
+            datetime.now(timezone.utc) - timedelta(seconds=10)
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
         result = subprocess.run(
             ["gh", "workflow", "run", str(wf_id)],
             cwd=str(rs.path),
@@ -2391,6 +2422,11 @@ def bg_dispatch_workflow(repo_key, wf_id, wf_name):
         if result.returncode == 0:
             ui_queue.put(("more_action_result", repo_key, True,
                           f"Dispatched '{wf_name}'"))
+            if app.actions_popup_enabled and rs.remote_url:
+                executor.submit(
+                    _launch_workflow_viewer_dispatch,
+                    repo_key, wf_id, wf_name, after_iso,
+                )
         else:
             err = result.stderr.strip() or result.stdout.strip()
             ui_queue.put(("more_action_result", repo_key, False,
