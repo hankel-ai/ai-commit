@@ -296,6 +296,7 @@ class AppState:
     global_git_email: str = ""
     non_git_folders: dict = field(default_factory=dict)
     repo_overrides: dict = field(default_factory=dict)  # repo_key -> "pause" or "active"
+    expand_on_next_build: set = field(default_factory=set)  # repo_keys to auto-expand on next UI rebuild (used when paused + single-repo Refresh)
 
 
 # ---------------------------------------------------------------------------
@@ -1166,6 +1167,8 @@ def _ctx_refresh_repo(sender, app_data, user_data):
         old_label = dpg.get_item_label(rs.header_tag)
         if not old_label.endswith(" ..."):
             dpg.configure_item(rs.header_tag, label=old_label + "  ...")
+    # Allow this repo to expand on the next rebuild even if globally paused
+    app.expand_on_next_build.add(repo_key)
     executor.submit(bg_refresh_single_repo, repo_key, True)
 
 
@@ -1958,9 +1961,12 @@ def build_repo_section(rs, parent, label_width=0):
     repo_key = str(rs.path)
     override = app.repo_overrides.get(repo_key, "")
     has_activity = change_count > 0 or rs.behind > 0 or rs.ahead > 0
+    force_expand = repo_key in app.expand_on_next_build
+    if force_expand:
+        app.expand_on_next_build.discard(repo_key)
     if override == "pause":
         should_open = False
-    elif app.paused and override != "active":
+    elif app.paused and override != "active" and not force_expand:
         should_open = False
     else:
         should_open = has_activity
