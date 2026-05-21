@@ -99,7 +99,13 @@ from ai_commit_core import (
     run_git,
 )
 
-from gh_workflows import detect_runs_for_commit, get_gh_token, parse_owner_repo
+from gh_workflows import (
+    detect_runs_for_commit,
+    fetch_workflow_yaml,
+    get_gh_token,
+    has_workflow_dispatch,
+    parse_owner_repo,
+)
 
 # ---------------------------------------------------------------------------
 # Win32 API setup (Windows only) — declare argtypes so ctypes handles
@@ -2240,27 +2246,39 @@ def bg_fetch_more_data(repo_key):
     # C. Local config overrides (already known from rs, but re-check live)
     local_name, local_email = get_git_user_local_override(cwd)
 
-    # D. Dispatchable workflows
+    # D. Dispatchable workflows that apply to the current branch:
+    # active + file exists on this branch + has a workflow_dispatch trigger.
     workflows = []
-    if rs.remote_url:
+    if rs.remote_url and current_branch:
+        owner, repo_name = parse_owner_repo(rs.remote_url)
+        token = get_gh_token()
         try:
             kwargs = {}
             if os.name == "nt":
                 kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
             result = subprocess.run(
-                ["gh", "workflow", "list", "--json", "name,id,state"],
+                ["gh", "workflow", "list", "--json", "name,id,state,path"],
                 cwd=cwd,
                 capture_output=True, text=True,
                 encoding="utf-8", errors="replace",
                 timeout=15, **kwargs,
             )
-            if result.returncode == 0 and result.stdout.strip():
+            if result.returncode == 0 and result.stdout.strip() and owner and repo_name and token:
                 wf_list = json.loads(result.stdout)
-                workflows = [
-                    {"name": w["name"], "id": w["id"]}
-                    for w in wf_list
-                    if w.get("state") == "active"
-                ]
+                for w in wf_list:
+                    if w.get("state") != "active":
+                        continue
+                    path = w.get("path", "")
+                    if not path:
+                        continue
+                    yaml_text = fetch_workflow_yaml(
+                        owner, repo_name, path, current_branch, token,
+                    )
+                    if yaml_text is None:
+                        continue
+                    if not has_workflow_dispatch(yaml_text):
+                        continue
+                    workflows.append({"name": w["name"], "id": w["id"]})
         except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
             pass
 
@@ -2340,6 +2358,7 @@ def _build_more_panel(rs, repo_key, data):
 
     # D. Dispatch workflow
     workflows = data.get("workflows", [])
+    ref = data.get("current_branch", "")
     if workflows:
         has_content = True
         dpg.add_text("  Run Workflow:", color=COL_ACCENT, parent=parent)
@@ -2349,11 +2368,11 @@ def _build_more_panel(rs, repo_key, data):
                 run_btn = dpg.add_button(
                     label="Run",
                     callback=cb_dispatch_workflow,
-                    user_data=(repo_key, wf["id"], wf["name"]),
+                    user_data=(repo_key, wf["id"], wf["name"], ref),
                 )
                 dpg.bind_item_theme(run_btn, green_btn_theme)
     else:
-        dpg.add_text("  Run Workflow: no dispatchable workflows", color=COL_DIM,
+        dpg.add_text("  Run Workflow: none for this branch", color=COL_DIM,
                      parent=parent)
 
     dpg.add_spacer(height=4, parent=parent)
@@ -2401,11 +2420,11 @@ def bg_remove_local_config(repo_key):
 
 
 def cb_dispatch_workflow(sender, app_data, user_data):
-    repo_key, wf_id, wf_name = user_data
-    executor.submit(bg_dispatch_workflow, repo_key, wf_id, wf_name)
+    repo_key, wf_id, wf_name, ref = user_data
+    executor.submit(bg_dispatch_workflow, repo_key, wf_id, wf_name, ref)
 
 
-def bg_dispatch_workflow(repo_key, wf_id, wf_name):
+def bg_dispatch_workflow(repo_key, wf_id, wf_name, ref):
     rs = app.repos.get(repo_key)
     if not rs:
         return
@@ -2418,8 +2437,11 @@ def bg_dispatch_workflow(repo_key, wf_id, wf_name):
         after_iso = (
             datetime.now(timezone.utc) - timedelta(seconds=10)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cmd = ["gh", "workflow", "run", str(wf_id)]
+        if ref:
+            cmd += ["--ref", ref]
         result = subprocess.run(
-            ["gh", "workflow", "run", str(wf_id)],
+            cmd,
             cwd=str(rs.path),
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",

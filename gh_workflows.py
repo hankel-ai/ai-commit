@@ -3,6 +3,8 @@
 Pure-Python module with no GUI imports.
 """
 
+import base64
+import binascii
 import io
 import json
 import os
@@ -10,6 +12,7 @@ import re
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
@@ -366,6 +369,78 @@ def parse_job_log_with_steps(log_text, step_names):
         result[current_step_num] = "\n".join(current_lines)
 
     return result
+
+
+def fetch_workflow_yaml(owner, repo, path, ref, token):
+    """Fetch a workflow file's text at a given ref. Returns None if missing or unreachable."""
+    safe_path = urllib.parse.quote(path)
+    safe_ref = urllib.parse.quote(ref, safe="")
+    try:
+        data = _api_get(
+            f"/repos/{owner}/{repo}/contents/{safe_path}?ref={safe_ref}",
+            token,
+        )
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if data.get("encoding") == "base64":
+        try:
+            return base64.b64decode(data.get("content", "")).decode(
+                "utf-8", errors="replace"
+            )
+        except (binascii.Error, ValueError):
+            return None
+    return data.get("content") or None
+
+
+def has_workflow_dispatch(yaml_text):
+    """Best-effort check: does this workflow's `on:` section include workflow_dispatch?
+
+    Handles the common forms without pulling in a YAML parser:
+        on: workflow_dispatch
+        on: [push, workflow_dispatch]
+        on:
+          workflow_dispatch:
+        on:
+          - workflow_dispatch
+    """
+    if not yaml_text:
+        return False
+
+    in_on_block = False
+    on_indent = -1
+    for raw in yaml_text.splitlines():
+        line = re.sub(r"\s+#.*$", "", raw).rstrip()
+        if not line:
+            continue
+        indent = len(raw) - len(raw.lstrip())
+
+        if not in_on_block:
+            m = re.match(r"^on\s*:\s*(.*)$", line)
+            if m and indent == 0:
+                rest = m.group(1).strip()
+                if rest:
+                    tokens = re.split(r"[,\[\]{}\s]+", rest)
+                    for tok in tokens:
+                        name = tok.strip(":'\"")
+                        if name == "workflow_dispatch":
+                            return True
+                    return False
+                in_on_block = True
+                on_indent = 0
+            continue
+
+        if indent <= on_indent:
+            in_on_block = False
+            continue
+        stripped = line.lstrip()
+        if re.match(r"^workflow_dispatch\s*:", stripped):
+            return True
+        if re.match(r"^-\s*workflow_dispatch\s*$", stripped):
+            return True
+
+    return False
 
 
 def cancel_run(owner, repo, run_id, token):
