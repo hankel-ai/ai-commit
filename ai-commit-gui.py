@@ -99,6 +99,7 @@ from ai_commit_core import (
     run_git,
 )
 
+import chime
 from gh_workflows import (
     detect_runs_for_commit,
     fetch_workflow_yaml,
@@ -296,6 +297,7 @@ class AppState:
     last_poll: float = 0.0
     paused: bool = False
     actions_popup_enabled: bool = True
+    chime_on_completion: bool = False
     show_non_git_folders: bool = True
     active_gh_account: str = ""
     global_git_name: str = ""
@@ -361,6 +363,7 @@ def _save_settings():
             "ollama_url": app.ollama_url,
             "watched_folders": [str(f) for f in app.watched_folders],
             "actions_popup_enabled": app.actions_popup_enabled,
+            "chime_on_completion": app.chime_on_completion,
             "show_non_git_folders": app.show_non_git_folders,
             "repo_overrides": app.repo_overrides,
         }
@@ -859,6 +862,7 @@ def _launch_workflow_viewer(repo_name, rs):
 
     _spawn_viewer_process({
         "owner": owner, "repo": repo, "sha": sha, "token": token,
+        "chime_enabled": app.chime_on_completion,
     })
 
 
@@ -878,6 +882,7 @@ def _launch_workflow_viewer_dispatch(repo_name, wf_id, wf_name, after_iso):
         "owner": owner, "repo": repo, "token": token,
         "workflow_id": wf_id, "workflow_name": wf_name,
         "after_iso": after_iso,
+        "chime_enabled": app.chime_on_completion,
     })
 
 
@@ -1216,6 +1221,15 @@ def cb_actions_popup(sender, app_data):
     _save_settings()
 
 
+def cb_chime_on_completion(sender, app_data):
+    app.chime_on_completion = dpg.get_value(sender)
+    _save_settings()
+
+
+def cb_test_chime(sender, app_data, user_data):
+    chime.play(success=bool(user_data))
+
+
 def cb_show_non_git(sender, app_data):
     app.show_non_git_folders = dpg.get_value(sender)
     _save_settings()
@@ -1255,6 +1269,15 @@ def cb_open_settings(sender, app_data):
         dpg.add_checkbox(label="Actions popup after push",
                          default_value=app.actions_popup_enabled,
                          callback=cb_actions_popup)
+        dpg.add_checkbox(label="Chime when workflow completes",
+                         default_value=app.chime_on_completion,
+                         callback=cb_chime_on_completion)
+        with dpg.group(horizontal=True):
+            dpg.add_spacer(width=20)
+            dpg.add_button(label="Test OK",
+                           callback=cb_test_chime, user_data=True)
+            dpg.add_button(label="Test Fail",
+                           callback=cb_test_chime, user_data=False)
         if sys.platform == "win32":
             dpg.add_checkbox(label="Run at startup",
                              default_value=_is_startup_enabled(),
@@ -3131,6 +3154,7 @@ def main():
         if "ollama_url" in saved:
             app.ollama_url = saved["ollama_url"]
         app.actions_popup_enabled = saved.get("actions_popup_enabled", True)
+        app.chime_on_completion = saved.get("chime_on_completion", False)
         app.show_non_git_folders = saved.get("show_non_git_folders", True)
         app.repo_overrides = saved.get("repo_overrides", {})
         if not folders_from_cli:

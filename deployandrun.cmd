@@ -7,3 +7,5 @@ powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $
 robocopy "%~dp0." "%USERPROFILE%\OneDrive\Programs\ai-commit" /E /XD .git /XF ai-commit-gui-settings.json /PURGE /NFL /NDL /NJH /NJS
 echo Deployed ai-commit to Programs\ai-commit
 timeout 2
+cd C:\Users\admin\OneDrive\Programs\ai-commit
+call C:\Users\admin\OneDrive\Programs\ai-commit\g-ui.cmd

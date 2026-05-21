@@ -17,6 +17,7 @@ from pathlib import Path
 
 import dearpygui.dearpygui as dpg
 
+import chime
 from gh_workflows import (
     Run, _api_get, cancel_run, detect_runs_for_commit,
     detect_runs_for_dispatch, fetch_job_log, fetch_jobs,
@@ -74,7 +75,8 @@ def _elapsed(started_at, completed_at=None):
 
 class Viewer:
     def __init__(self, owner, repo, token, *, sha=None,
-                 workflow_id=None, workflow_name=None, after_iso=None):
+                 workflow_id=None, workflow_name=None, after_iso=None,
+                 chime_enabled=False):
         self.owner = owner
         self.repo = repo
         self.token = token
@@ -84,6 +86,7 @@ class Viewer:
         self.workflow_name = workflow_name or ""
         self.after_iso = after_iso or ""
         self.mode = "dispatch" if workflow_id else "commit"
+        self.chime_enabled = chime_enabled
 
         self.ui_queue = queue.Queue()
         self.stop_event = threading.Event()
@@ -221,7 +224,11 @@ class Viewer:
                     ns = rd.get("status", run.status)
                     nc = rd.get("conclusion")
                     if ns != run.status or nc != run.conclusion:
+                        was_completed = run.status == "completed"
                         run.status, run.conclusion = ns, nc
+                        if (self.chime_enabled and not was_completed
+                                and ns == "completed"):
+                            chime.play(success=(nc == "success"))
                         self.ui_queue.put(
                             ("run_status", run.id, ns, nc)
                         )
@@ -574,6 +581,7 @@ def main():
         workflow_id=data.get("workflow_id"),
         workflow_name=data.get("workflow_name"),
         after_iso=data.get("after_iso"),
+        chime_enabled=data.get("chime_enabled", False),
     )
     viewer.run()
 
