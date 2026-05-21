@@ -310,18 +310,22 @@ def get_diff(cwd):
     if stdout.strip():
         parts.append(stdout)
 
-    # Untracked files -- show their content so the LLM knows what's new
-    _, status_out, _ = run_git(["status", "--porcelain"], cwd=cwd)
-    for line in status_out.splitlines():
-        if line.startswith("??"):
-            filepath = _unquote_path(line[3:])
-            full = Path(cwd) / filepath
-            if full.is_file():
-                try:
-                    content = full.read_text(encoding="utf-8", errors="replace")
-                    parts.append(f"--- /dev/null\n+++ b/{filepath}\n(new file)\n{content}")
-                except OSError:
-                    parts.append(f"--- /dev/null\n+++ b/{filepath}\n(new file, unreadable)")
+    # Untracked files -- show their content so the LLM knows what's new.
+    # Use ls-files so untracked *directories* are expanded into individual
+    # files; `status --porcelain` collapses them to a single "?? dir/" line.
+    _, untracked_out, _ = run_git(
+        ["ls-files", "--others", "--exclude-standard", "-z"], cwd=cwd,
+    )
+    for filepath in untracked_out.split("\0"):
+        if not filepath:
+            continue
+        full = Path(cwd) / filepath
+        if full.is_file():
+            try:
+                content = full.read_text(encoding="utf-8", errors="replace")
+                parts.append(f"--- /dev/null\n+++ b/{filepath}\n(new file)\n{content}")
+            except OSError:
+                parts.append(f"--- /dev/null\n+++ b/{filepath}\n(new file, unreadable)")
 
     combined = "\n".join(parts)
     if len(combined) > MAX_DIFF_CHARS:
