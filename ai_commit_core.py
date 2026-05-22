@@ -237,8 +237,10 @@ def get_sync_status(cwd, fetch=True):
     Returns (0, 0) if there is no remote or no tracking branch.
     """
     if fetch:
-        # Fetch silently — ignore errors (offline, no remote, etc.)
-        run_git(["fetch", "--quiet"], cwd=cwd)
+        # Fetch silently — ignore errors (offline, no remote, etc.).
+        # --prune drops stale remote-tracking refs so branch_status detection
+        # ("stale" vs "local only" vs synced) stays accurate.
+        run_git(["fetch", "--prune", "--quiet"], cwd=cwd)
 
     # Find the upstream tracking branch
     rc, upstream, _ = run_git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd=cwd)
@@ -256,6 +258,54 @@ def get_sync_status(cwd, fetch=True):
         return int(parts[0]), int(parts[1])
     except ValueError:
         return 0, 0
+
+
+def get_branch_classification(cwd):
+    """Return dict of local branch name -> "", "local only", or "stale".
+
+    "local only" -> branch has no upstream configured.
+    "stale"      -> branch has an upstream, but the upstream ref no longer
+                    exists locally (i.e. remote branch was deleted and the
+                    last fetch ran with --prune).
+    ""           -> upstream exists; branch is in sync (ahead/behind aside).
+    """
+    # Skip classification entirely for repos with no remote configured —
+    # the header already shows "LOCAL", so per-branch "(local only)" is noise.
+    rc, remotes_out, _ = run_git(["remote"], cwd=cwd)
+    if rc != 0 or not remotes_out.strip():
+        return {}
+
+    rc, stdout, _ = run_git(
+        ["for-each-ref", "--format=%(refname:short)|%(upstream:short)", "refs/heads/"],
+        cwd=cwd,
+    )
+    if rc != 0:
+        return {}
+
+    rc2, stdout2, _ = run_git(
+        ["for-each-ref", "--format=%(refname:short)", "refs/remotes/"],
+        cwd=cwd,
+    )
+    live_remote_refs = {
+        line.strip() for line in stdout2.splitlines() if line.strip()
+    } if rc2 == 0 else set()
+
+    result = {}
+    for line in stdout.splitlines():
+        if "|" not in line:
+            continue
+        name, upstream = line.split("|", 1)
+        name = name.strip()
+        upstream = upstream.strip()
+        if not name:
+            continue
+        if not upstream:
+            result[name] = "local only"
+        elif upstream not in live_remote_refs:
+            result[name] = "stale"
+        else:
+            result[name] = ""
+    return result
 
 
 def get_incoming_changes(cwd):

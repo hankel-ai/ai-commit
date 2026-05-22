@@ -82,6 +82,7 @@ from ai_commit_core import (
     do_pull,
     generate_message,
     get_active_github_account,
+    get_branch_classification,
     get_current_branch,
     get_diff,
     get_git_global_user,
@@ -261,6 +262,7 @@ class RepoState:
     effective_email: str = ""
     visibility: str = ""
     branch: str = ""
+    branch_status: str = ""  # "", "local only", or "stale"
     last_commit_msg: str = ""
     last_commit_date: str = ""
     ahead: int = 0
@@ -675,6 +677,7 @@ def bg_poll_repos(force=False):
                     "effective_name": existing.effective_name,
                     "effective_email": existing.effective_email,
                     "branch": existing.branch,
+                    "branch_status": existing.branch_status,
                     "last_commit_msg": existing.last_commit_msg,
                     "last_commit_date": existing.last_commit_date,
                     "ahead": existing.ahead,
@@ -705,6 +708,7 @@ def bg_poll_repos(force=False):
             effective_email = eff_email_raw.strip() if rc_e == 0 else ""
             branch = get_current_branch(rp)
             ahead, behind = get_sync_status(rp, fetch=is_new or force)
+            branch_status = get_branch_classification(rp).get(branch, "")
             results[repo_key] = {
                 "path": rp,
                 "entries": entries,
@@ -717,6 +721,7 @@ def bg_poll_repos(force=False):
                 "effective_name": effective_name,
                 "effective_email": effective_email,
                 "branch": branch,
+                "branch_status": branch_status,
                 "last_commit_msg": last_msg,
                 "last_commit_date": last_date,
                 "ahead": ahead,
@@ -759,6 +764,7 @@ def bg_refresh_single_repo(repo_name, force=False):
     effective_email = eff_email_raw.strip() if rc_e == 0 else ""
     branch = get_current_branch(rp)
     ahead, behind = get_sync_status(rp)
+    branch_status = get_branch_classification(rp).get(branch, "")
     ui_queue.put(("single_repo_refresh", repo_name, {
         "path": rp,
         "entries": entries,
@@ -771,6 +777,7 @@ def bg_refresh_single_repo(repo_name, force=False):
         "effective_name": effective_name,
         "effective_email": effective_email,
         "branch": branch,
+        "branch_status": branch_status,
         "last_commit_msg": last_msg,
         "last_commit_date": last_date,
         "ahead": ahead,
@@ -925,6 +932,7 @@ def bg_refresh_then_generate(repo_name):
     effective_email = eff_email_raw.strip() if rc_e == 0 else ""
     branch = get_current_branch(rp)
     ahead, behind = get_sync_status(rp, fetch=False)
+    branch_status = get_branch_classification(rp).get(branch, "")
     ui_queue.put(("refresh_then_generate", repo_name, {
         "path": rp,
         "entries": entries,
@@ -937,6 +945,7 @@ def bg_refresh_then_generate(repo_name):
         "effective_name": effective_name,
         "effective_email": effective_email,
         "branch": branch,
+        "branch_status": branch_status,
         "last_commit_msg": last_msg,
         "last_commit_date": last_date,
         "ahead": ahead,
@@ -1964,6 +1973,8 @@ def _repo_base_label(rs):
         label += f"  !! {rs.behind} BEHIND"
     elif rs.ahead > 0:
         label += f"  !! {rs.ahead} NOT PUSHED"
+    if rs.branch_status:
+        label += f"  ({rs.branch_status})"
     return label
 
 
@@ -2241,8 +2252,16 @@ def bg_fetch_more_data(repo_key):
             elif line_s:
                 local_branches.append(line_s)
 
-    branch_options = list(local_branches)
-    branch_targets = {b: ["checkout", b] for b in local_branches}
+    # Annotate local branches with "(local only)" / "(stale)" so deleted
+    # remote branches and never-pushed branches are visible at a glance.
+    classifications = get_branch_classification(cwd)
+    branch_options = []
+    branch_targets = {}
+    for b in local_branches:
+        status = classifications.get(b, "")
+        label = f"{b}  ({status})" if status else b
+        branch_options.append(label)
+        branch_targets[label] = ["checkout", b]
 
     rc, stdout, _ = run_git(
         ["branch", "-r", "--format=%(refname:short)"], cwd=cwd)
@@ -2339,7 +2358,12 @@ def _build_more_panel(rs, repo_key, data):
     branches = data.get("branches", [])
     current = data.get("current_branch", "")
     rs.more_branch_targets = data.get("branch_targets", {})
-    other_branches = [b for b in branches if b != current]
+    # Filter out the current branch by matching the underlying checkout target,
+    # not the label (labels may carry "(local only)" / "(stale)" suffixes).
+    current_target = ["checkout", current]
+    other_branches = [
+        b for b in branches if rs.more_branch_targets.get(b) != current_target
+    ]
     if other_branches:
         has_content = True
         with dpg.group(horizontal=True, parent=parent):
@@ -2601,6 +2625,7 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False):
             effective_name=info.get("effective_name", ""),
             effective_email=info.get("effective_email", ""),
             branch=info.get("branch", ""),
+            branch_status=info.get("branch_status", ""),
             last_commit_msg=info.get("last_commit_msg", ""),
             last_commit_date=info.get("last_commit_date", ""),
             ahead=info.get("ahead", 0),
@@ -2791,6 +2816,7 @@ def process_queue():
                     "effective_name": rs.effective_name,
                     "effective_email": rs.effective_email,
                     "branch": rs.branch,
+                    "branch_status": rs.branch_status,
                     "last_commit_msg": rs.last_commit_msg,
                     "last_commit_date": rs.last_commit_date,
                     "ahead": rs.ahead,
@@ -2816,6 +2842,7 @@ def process_queue():
                     "effective_name": rs.effective_name,
                     "effective_email": rs.effective_email,
                     "branch": rs.branch,
+                    "branch_status": rs.branch_status,
                     "last_commit_msg": rs.last_commit_msg,
                     "last_commit_date": rs.last_commit_date,
                     "ahead": rs.ahead,
