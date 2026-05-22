@@ -2254,14 +2254,19 @@ def bg_fetch_more_data(repo_key):
 
     # Annotate local branches with "(local only)" / "(stale)" so deleted
     # remote branches and never-pushed branches are visible at a glance.
+    # `deletable` maps "name  (status)" labels -> branch name for the
+    # Delete-branch dropdown; only local-only / stale entries qualify.
     classifications = get_branch_classification(cwd)
     branch_options = []
     branch_targets = {}
+    deletable = {}
     for b in local_branches:
         status = classifications.get(b, "")
         label = f"{b}  ({status})" if status else b
         branch_options.append(label)
         branch_targets[label] = ["checkout", b]
+        if status in ("local only", "stale") and b != current_branch:
+            deletable[label] = b
 
     rc, stdout, _ = run_git(
         ["branch", "-r", "--format=%(refname:short)"], cwd=cwd)
@@ -2328,6 +2333,7 @@ def bg_fetch_more_data(repo_key):
         "ignored_files": ignored_files,
         "branches": branch_options,
         "branch_targets": branch_targets,
+        "deletable": deletable,
         "current_branch": current_branch,
         "local_name": local_name,
         "local_email": local_email,
@@ -2381,6 +2387,26 @@ def _build_more_panel(rs, repo_key, data):
             dpg.bind_item_theme(switch_btn, link_btn_theme)
     else:
         dpg.add_text("  Switch branch: only one branch", color=COL_DIM, parent=parent)
+
+    # B.5 Delete local-only / stale branches
+    deletable = data.get("deletable", {})
+    rs.more_deletable = dict(deletable)
+    if deletable:
+        has_content = True
+        labels = list(deletable.keys())
+        with dpg.group(horizontal=True, parent=parent):
+            dpg.add_text("  Delete branch:", color=COL_ACCENT)
+            del_combo_tag = dpg.add_combo(
+                labels,
+                default_value=labels[0],
+                width=280,
+            )
+            del_btn = dpg.add_button(
+                label="Delete",
+                callback=cb_delete_branch,
+                user_data=(repo_key, del_combo_tag),
+            )
+            dpg.bind_item_theme(del_btn, remove_btn_theme)
 
     # C. Remove local config override
     local_name = data.get("local_name", "")
@@ -2449,6 +2475,47 @@ def bg_switch_branch(repo_key, label, args):
     else:
         ui_queue.put(("more_action_result", repo_key, False,
                       f"Switch failed: {stderr.strip()}"))
+
+
+def cb_delete_branch(sender, app_data, user_data):
+    """Delete the selected local-only / stale branch (from the Delete combo)."""
+    repo_key, combo_tag = user_data
+    label = dpg.get_value(combo_tag)
+    if not label:
+        return
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    deletable = getattr(rs, "more_deletable", {})
+    branch_name = deletable.get(label)
+    if not branch_name:
+        # Combo value isn't in the deletable set (shouldn't happen via UI).
+        ui_queue.put(("more_action_result", repo_key, False,
+                      f"Refusing to delete '{label}' (not local-only or stale)"))
+        return
+    executor.submit(bg_delete_branch, repo_key, branch_name, False)
+
+
+def bg_delete_branch(repo_key, branch_name, force):
+    """Delete a local branch. Tries safe (-d) first; if that refuses because
+    of unmerged work, posts a 'delete_branch_needs_force' message so the UI
+    can prompt for force-delete confirmation."""
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    flag = "-D" if force else "-d"
+    rc, stdout, stderr = run_git(["branch", flag, branch_name], cwd=str(rs.path))
+    if rc == 0:
+        ui_queue.put(("more_action_result", repo_key, True,
+                      f"Deleted branch '{branch_name}'"))
+        bg_refresh_single_repo(repo_key)
+        return
+    err = stderr.strip() or stdout.strip()
+    if not force and "not fully merged" in err.lower():
+        ui_queue.put(("delete_branch_needs_force", repo_key, branch_name, err))
+        return
+    ui_queue.put(("more_action_result", repo_key, False,
+                  f"Delete failed: {err}"))
 
 
 def cb_remove_local_config(sender, app_data, user_data):
@@ -3094,6 +3161,50 @@ def process_queue():
             if rs and rs.status_tag and dpg.does_item_exist(rs.status_tag):
                 dpg.set_value(rs.status_tag, detail)
                 dpg.configure_item(rs.status_tag, color=COL_GREEN if ok else COL_RED)
+
+        elif kind == "delete_branch_needs_force":
+            _, repo_key, branch_name, err = msg
+            rs = app.repos.get(repo_key)
+            if not rs:
+                continue
+            win_tag = dpg.generate_uuid()
+            with dpg.window(
+                label=f"Force delete branch?",
+                tag=win_tag,
+                width=460, height=180,
+                no_collapse=True, modal=True,
+                on_close=lambda s, a, u: (
+                    dpg.delete_item(s) if dpg.does_item_exist(s) else None
+                ),
+            ):
+                dpg.add_text(
+                    f"Branch '{branch_name}' has unmerged commits.",
+                    color=COL_YELLOW,
+                )
+                dpg.add_text(err, color=COL_DIM, wrap=420)
+                dpg.add_spacer(height=8)
+                dpg.add_text(
+                    "Force delete will discard those commits permanently.",
+                    color=COL_RED,
+                )
+                dpg.add_spacer(height=8)
+                with dpg.group(horizontal=True):
+                    force_btn = dpg.add_button(
+                        label="Force Delete",
+                        callback=lambda s, a, u: (
+                            dpg.delete_item(u[2]) if dpg.does_item_exist(u[2]) else None,
+                            executor.submit(bg_delete_branch, u[0], u[1], True),
+                        ),
+                        user_data=(repo_key, branch_name, win_tag),
+                    )
+                    dpg.bind_item_theme(force_btn, remove_btn_theme)
+                    dpg.add_button(
+                        label="Cancel",
+                        callback=lambda s, a, u: (
+                            dpg.delete_item(u) if dpg.does_item_exist(u) else None
+                        ),
+                        user_data=win_tag,
+                    )
 
         elif kind == "tray_show":
             _show_window()
