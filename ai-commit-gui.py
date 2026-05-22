@@ -2918,7 +2918,7 @@ def process_queue():
                 if ok:
                     dpg.set_value(rs.status_tag, "Pulled successfully!")
                     dpg.configure_item(rs.status_tag, color=COL_GREEN)
-                    executor.submit(bg_poll_repos)
+                    executor.submit(bg_refresh_single_repo, repo_name)
                 else:
                     dpg.set_value(rs.status_tag, f"Pull failed: {detail}")
                     dpg.configure_item(rs.status_tag, color=COL_RED)
