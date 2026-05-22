@@ -684,20 +684,21 @@ def bg_poll_repos(force=False):
                     "behind": existing.behind,
                 }
                 continue
+            repo_force = force or repo_override == "active"
             ui_queue.put(("repo_loading", repo_key, rp.name))
             entries = get_status(rp)
             last_msg, last_date = get_last_commit(rp)
             is_new = existing is None
-            if not force and existing and existing.remote_url:
+            if not repo_force and existing and existing.remote_url:
                 remote_url = existing.remote_url
             else:
                 remote_url = get_remote_url(rp)
-            if not force and existing and existing.git_user:
+            if not repo_force and existing and existing.git_user:
                 git_user = existing.git_user
             else:
                 git_user = get_git_user(rp)
             github_account = get_github_account(remote_url)
-            if not force and existing and existing.visibility:
+            if not repo_force and existing and existing.visibility:
                 visibility = existing.visibility
             else:
                 visibility = get_repo_visibility(rp) if remote_url else ""
@@ -707,7 +708,7 @@ def bg_poll_repos(force=False):
             effective_name = eff_name_raw.strip() if rc_n == 0 else ""
             effective_email = eff_email_raw.strip() if rc_e == 0 else ""
             branch = get_current_branch(rp)
-            ahead, behind = get_sync_status(rp, fetch=is_new or force)
+            ahead, behind = get_sync_status(rp, fetch=is_new or repo_force)
             branch_status = get_branch_classification(rp).get(branch, "")
             results[repo_key] = {
                 "path": rp,
