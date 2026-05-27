@@ -911,6 +911,19 @@ def bg_commit_and_push(repo_name, message):
         ui_queue.put(("commit_result", repo_name, False, False, str(exc)))
 
 
+def bg_push_set_upstream(repo_name, branch):
+    """Push with --set-upstream for a branch that has no remote tracking."""
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    rc, out, err = run_git(["push", "--set-upstream", "origin", branch],
+                           cwd=str(rs.path))
+    if rc == 0:
+        ui_queue.put(("push_upstream_result", repo_name, True, out.strip()))
+    else:
+        ui_queue.put(("push_upstream_result", repo_name, False, err.strip()))
+
+
 def bg_refresh_then_generate(repo_name):
     """Refresh repo status then generate a commit message.
 
@@ -1464,6 +1477,57 @@ def _cb_confirm_create_remote(sender, app_data, user_data):
     dpg.set_value(rs.status_tag, f"Creating {visibility} repo on {account}...")
     dpg.configure_item(rs.status_tag, color=COL_YELLOW)
     executor.submit(bg_create_remote, repo_key, account, visibility)
+
+
+def _show_upstream_prompt(repo_name, branch):
+    """Show a popup asking the user to push with --set-upstream."""
+    win_tag = dpg.generate_uuid()
+    pop_w, pop_h = 440, 130
+    click_pos = dpg.get_mouse_pos()
+    px = max(0, int(click_pos[0]) - pop_w // 2)
+    py = max(0, int(click_pos[1]))
+
+    with dpg.window(
+        label="Set Upstream Branch",
+        tag=win_tag,
+        width=pop_w, height=pop_h,
+        pos=(px, py),
+        no_collapse=True,
+        on_close=lambda s, a, u: (
+            dpg.delete_item(s) if dpg.does_item_exist(s) else None
+        ),
+    ):
+        dpg.add_text(f"Branch '{branch}' has no remote tracking branch.")
+        dpg.add_text(f"Run: git push --set-upstream origin {branch}",
+                     color=COL_DIM)
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True):
+            push_btn = dpg.add_button(
+                label="Push & Set Upstream",
+                callback=_cb_confirm_upstream,
+                user_data=(repo_name, branch, win_tag),
+            )
+            dpg.bind_item_theme(push_btn, green_btn_theme)
+            dpg.add_button(
+                label="Cancel",
+                user_data=win_tag,
+                callback=lambda s, a, u: (
+                    dpg.delete_item(u) if dpg.does_item_exist(u) else None
+                ),
+            )
+
+
+def _cb_confirm_upstream(sender, app_data, user_data):
+    """User confirmed push --set-upstream."""
+    repo_name, branch, win_tag = user_data
+    if dpg.does_item_exist(win_tag):
+        dpg.delete_item(win_tag)
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    dpg.set_value(rs.status_tag, f"Pushing to origin/{branch}...")
+    dpg.configure_item(rs.status_tag, color=COL_YELLOW)
+    executor.submit(bg_push_set_upstream, repo_name, branch)
 
 
 def cb_open_terminal(sender, app_data, user_data):
@@ -2160,7 +2224,12 @@ def build_repo_section(rs, parent, label_width=0):
 
         dpg.add_spacer(height=4, parent=rs.header_tag)
     else:
-        rs.status_tag = dpg.add_text("Clean", color=COL_DIM, parent=rs.header_tag)
+        if rs.gen_status == GenStatus.ERROR and rs.error_message:
+            rs.status_tag = dpg.add_text(
+                f"Error: {rs.error_message}",
+                color=COL_RED, parent=rs.header_tag, wrap=0)
+        else:
+            rs.status_tag = dpg.add_text("Clean", color=COL_DIM, parent=rs.header_tag)
         rs.input_tag = 0
 
 
@@ -2661,8 +2730,10 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False):
         # Decide what to keep
         if name in preserved:
             prev_msg, prev_gen, prev_err = preserved[name]
-            # Sticky errors survive rebuilds (cleared by manual Refresh)
-            if prev_gen == GenStatus.ERROR and not clear_errors:
+            # Sticky errors survive rebuilds (cleared by manual Refresh
+            # or automatic polling when repo is force-active)
+            repo_force_active = app.repo_overrides.get(name, "") == "active"
+            if prev_gen == GenStatus.ERROR and not clear_errors and not repo_force_active:
                 msg, gen, err = prev_msg, prev_gen, prev_err
             elif prev_gen == GenStatus.GENERATING:
                 msg, gen, err = prev_msg, prev_gen, prev_err
@@ -2824,6 +2895,15 @@ def process_queue():
                 dpg.set_value(rs.status_tag, "Committed!")
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
                 executor.submit(bg_refresh_single_repo, repo_name)
+            elif committed and not pushed and detail.startswith("NO_UPSTREAM:"):
+                branch = detail.split(":", 1)[1]
+                rs.gen_status = GenStatus.IDLE
+                rs.commit_message = ""
+                if rs.input_tag and dpg.does_item_exist(rs.input_tag):
+                    dpg.set_value(rs.input_tag, "")
+                dpg.set_value(rs.status_tag, f"No upstream for {branch} — set up tracking?")
+                dpg.configure_item(rs.status_tag, color=COL_YELLOW)
+                _show_upstream_prompt(repo_name, branch)
             elif committed and not pushed:
                 rs.gen_status = GenStatus.ERROR
                 rs.commit_message = ""
@@ -2834,6 +2914,23 @@ def process_queue():
             else:
                 rs.gen_status = GenStatus.ERROR
                 rs.error_message = detail
+                update_repo_status(rs)
+
+        elif kind == "push_upstream_result":
+            _, repo_name, success, detail = msg
+            rs = app.repos.get(repo_name)
+            if not rs:
+                continue
+            if success:
+                rs.gen_status = GenStatus.IDLE
+                dpg.set_value(rs.status_tag, "Committed & pushed!")
+                dpg.configure_item(rs.status_tag, color=COL_GREEN)
+                executor.submit(bg_refresh_single_repo, repo_name)
+                if app.actions_popup_enabled and rs.remote_url:
+                    executor.submit(_launch_workflow_viewer, repo_name, rs)
+            else:
+                rs.gen_status = GenStatus.ERROR
+                rs.error_message = f"Push failed: {detail}"
                 update_repo_status(rs)
 
         elif kind == "workflow_check":

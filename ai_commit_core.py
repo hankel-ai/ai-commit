@@ -547,6 +547,9 @@ def do_commit_and_push(cwd, message):
 
     rc, push_out, push_err = run_git(["push"], cwd=cwd)
     if rc != 0:
+        if "has no upstream branch" in push_err or "no upstream branch" in push_err:
+            branch = get_current_branch(cwd)
+            return True, False, f"NO_UPSTREAM:{branch}"
         detail += f"\nPush failed: {push_err.strip()}"
         return True, False, detail
 
