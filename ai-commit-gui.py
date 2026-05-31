@@ -1786,6 +1786,7 @@ def cb_remove_folder(sender, app_data, user_data):
     folder = Path(user_data)
     if folder in app.watched_folders:
         app.watched_folders.remove(folder)
+        _save_settings()
         _rebuild_folders_ui()
         trigger_poll()
 
@@ -3234,6 +3235,7 @@ def process_queue():
             folder = Path(chosen).resolve()
             if folder.is_dir() and folder not in app.watched_folders:
                 app.watched_folders.append(folder)
+                _save_settings()
                 _rebuild_folders_ui()
                 trigger_poll()
 
