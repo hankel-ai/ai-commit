@@ -3566,6 +3566,8 @@ def main():
 
     # Render loop
     _hwnd_retry_count = 0
+    _last_geom = None
+    _geom_dirty_at = None
     while dpg.is_dearpygui_running():
         process_queue()
 
@@ -3591,6 +3593,21 @@ def main():
             trigger_poll()
 
         dpg.render_dearpygui_frame()
+
+        # Persist window geometry shortly after the user stops moving/resizing
+        # (debounced so we don't write the settings file on every drag frame).
+        if not _window_hidden:
+            _pos = dpg.get_viewport_pos()
+            _geom = (int(_pos[0]), int(_pos[1]),
+                     dpg.get_viewport_width(), dpg.get_viewport_height())
+            if _last_geom is None:
+                _last_geom = _geom
+            elif _geom != _last_geom:
+                _last_geom = _geom
+                _geom_dirty_at = now
+            elif _geom_dirty_at is not None and now - _geom_dirty_at >= 1.0:
+                _geom_dirty_at = None
+                _save_settings()
 
         # Apply deferred macOS topmost change between frames
         if _pending_topmost is not None and _nswindow:
