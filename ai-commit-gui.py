@@ -2404,6 +2404,7 @@ def bg_fetch_more_data(repo_key):
         "ignored_files": ignored_files,
         "branches": branch_options,
         "branch_targets": branch_targets,
+        "local_branch_names": list(local_branches),
         "deletable": deletable,
         "current_branch": current_branch,
         "local_name": local_name,
@@ -2430,6 +2431,23 @@ def _build_more_panel(rs, repo_key, data):
             dpg.add_text(f"    {f}", color=COL_DIM, parent=parent)
     else:
         dpg.add_text("  Gitignored files: none", color=COL_DIM, parent=parent)
+
+    # A.5 New branch (create off current HEAD and switch to it)
+    rs.more_local_branches = set(data.get("local_branch_names", []))
+    has_content = True
+    with dpg.group(horizontal=True, parent=parent):
+        dpg.add_text("  New branch:", color=COL_ACCENT)
+        name_input = dpg.add_input_text(
+            width=280, hint="new-branch-name", on_enter=True,
+        )
+        dpg.configure_item(name_input, callback=cb_create_branch,
+                           user_data=(repo_key, name_input))
+        create_btn = dpg.add_button(
+            label="Create",
+            callback=cb_create_branch,
+            user_data=(repo_key, name_input),
+        )
+        dpg.bind_item_theme(create_btn, green_btn_theme)
 
     # B. Switch branch (local + remote-only)
     branches = data.get("branches", [])
@@ -2546,6 +2564,47 @@ def bg_switch_branch(repo_key, label, args):
     else:
         ui_queue.put(("more_action_result", repo_key, False,
                       f"Switch failed: {stderr.strip()}"))
+
+
+def cb_create_branch(sender, app_data, user_data):
+    """Create a new branch off current HEAD and switch to it."""
+    repo_key, input_tag = user_data
+    name = dpg.get_value(input_tag).strip()
+    if not name:
+        ui_queue.put(("more_action_result", repo_key, False,
+                      "Enter a branch name"))
+        return
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    if name in getattr(rs, "more_local_branches", set()):
+        ui_queue.put(("more_action_result", repo_key, False,
+                      f"Branch '{name}' already exists"))
+        return
+    executor.submit(bg_create_branch, repo_key, name, False)
+
+
+def bg_create_branch(repo_key, name, confirmed):
+    """Create branch `name` off HEAD via `git switch -c` and switch to it.
+    Checks the live working tree first; if there are uncommitted changes and
+    the user hasn't confirmed yet, posts 'create_branch_needs_confirm' so the
+    UI can warn before proceeding (the changes ride along to the new branch)."""
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    cwd = str(rs.path)
+    entries = get_status(cwd)
+    if entries and not confirmed:
+        ui_queue.put(("create_branch_needs_confirm", repo_key, name, len(entries)))
+        return
+    rc, stdout, stderr = run_git(["switch", "-c", name], cwd=cwd)
+    if rc == 0:
+        ui_queue.put(("more_action_result", repo_key, True,
+                      f"Created and switched to '{name}'"))
+        bg_refresh_single_repo(repo_key)
+    else:
+        ui_queue.put(("more_action_result", repo_key, False,
+                      f"Create failed: {stderr.strip()}"))
 
 
 def cb_delete_branch(sender, app_data, user_data):
@@ -3298,6 +3357,48 @@ def process_queue():
                         user_data=(repo_key, branch_name, win_tag),
                     )
                     dpg.bind_item_theme(force_btn, remove_btn_theme)
+                    dpg.add_button(
+                        label="Cancel",
+                        callback=lambda s, a, u: (
+                            dpg.delete_item(u) if dpg.does_item_exist(u) else None
+                        ),
+                        user_data=win_tag,
+                    )
+
+        elif kind == "create_branch_needs_confirm":
+            _, repo_key, name, n = msg
+            rs = app.repos.get(repo_key)
+            if not rs:
+                continue
+            win_tag = dpg.generate_uuid()
+            with dpg.window(
+                label="Create branch with uncommitted changes?",
+                tag=win_tag,
+                width=460, height=160,
+                no_collapse=True, modal=True,
+                on_close=lambda s, a, u: (
+                    dpg.delete_item(s) if dpg.does_item_exist(s) else None
+                ),
+            ):
+                dpg.add_text(
+                    f"You have {n} uncommitted change(s).",
+                    color=COL_YELLOW,
+                )
+                dpg.add_text(
+                    f"They will move with you to new branch '{name}'.",
+                    color=COL_DIM, wrap=420,
+                )
+                dpg.add_spacer(height=8)
+                with dpg.group(horizontal=True):
+                    proceed_btn = dpg.add_button(
+                        label="Create & switch",
+                        callback=lambda s, a, u: (
+                            dpg.delete_item(u[2]) if dpg.does_item_exist(u[2]) else None,
+                            executor.submit(bg_create_branch, u[0], u[1], True),
+                        ),
+                        user_data=(repo_key, name, win_tag),
+                    )
+                    dpg.bind_item_theme(proceed_btn, green_btn_theme)
                     dpg.add_button(
                         label="Cancel",
                         callback=lambda s, a, u: (
