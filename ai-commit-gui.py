@@ -1344,6 +1344,11 @@ def cb_generate(sender, app_data, user_data):
     if rs.input_tag and dpg.does_item_exist(rs.input_tag):
         dpg.set_value(rs.input_tag, "")
     update_repo_status(rs)
+    # Mirror the single-repo Refresh path (_ctx_refresh_repo): the status
+    # refresh below rebuilds the repo list, which would otherwise re-collapse
+    # this header while globally paused. Flag it to stay expanded across that
+    # one rebuild (the flag is consumed in the build at expand_on_next_build).
+    app.expand_on_next_build.add(repo_name)
     # Refresh repo status first, then generate (handled in queue processor)
     executor.submit(bg_refresh_then_generate, repo_name)
 
