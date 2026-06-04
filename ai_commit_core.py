@@ -209,6 +209,23 @@ def get_current_branch(cwd):
     return stdout.strip() if rc == 0 else ""
 
 
+def find_autostash_ref(stash_list_output, branch):
+    """Return the topmost ``stash@{N}`` ref tagged for *branch*, or None.
+
+    Matches only stashes created by ai-commit's Switch Branch autostash
+    (message ``ai-commit-autostash:<branch>``); never manual ``git stash``
+    entries. ``git stash list`` orders newest first, so the first match is the
+    most recent.
+    """
+    if not branch or branch == "HEAD":
+        return None
+    marker = f"ai-commit-autostash:{branch}"
+    for line in stash_list_output.splitlines():
+        if line.rstrip().endswith(marker):
+            return line.split(":", 1)[0].strip()
+    return None
+
+
 def get_last_commit(cwd):
     """Return (full_message, short_date) for HEAD, or ("", "")."""
     # Fetch date separately to avoid delimiter issues with commit body

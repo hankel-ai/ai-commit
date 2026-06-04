@@ -78,6 +78,7 @@ from ai_commit_core import (
     OllamaError,
     default_config,
     discover_repos,
+    find_autostash_ref,
     do_commit_and_push,
     do_pull,
     generate_message,
@@ -2553,17 +2554,67 @@ def cb_switch_branch(sender, app_data, user_data):
     executor.submit(bg_switch_branch, repo_key, label, args)
 
 
-def bg_switch_branch(repo_key, label, args):
+def bg_switch_branch(repo_key, label, args, confirmed=False):
+    """Switch to *label*, isolating any uncommitted work via a branch-tagged
+    autostash. If the source tree is dirty (on a real branch) and the user
+    hasn't confirmed, posts 'switch_branch_needs_confirm' first. The stash
+    (including untracked files) is tagged with the source branch and
+    auto-restored when the user returns to it."""
     rs = app.repos.get(repo_key)
     if not rs:
         return
-    rc, stdout, stderr = run_git(args, cwd=str(rs.path))
-    if rc == 0:
-        ui_queue.put(("more_action_result", repo_key, True, f"Switched to {label}"))
-        bg_refresh_single_repo(repo_key)
-    else:
+    cwd = str(rs.path)
+    source = get_current_branch(cwd)
+    detached = source in ("", "HEAD")
+    entries = get_status(cwd)
+
+    # Confirm gate: only when there's something to stash on a real branch.
+    if entries and not detached and not confirmed:
+        ui_queue.put(("switch_branch_needs_confirm", repo_key, label, args,
+                      source, len(entries)))
+        return
+
+    # Stash uncommitted work (incl. untracked) tagged with the source branch.
+    stashed = False
+    if entries and not detached:
+        marker = f"ai-commit-autostash:{source}"
+        rc, _, err = run_git(
+            ["stash", "push", "--include-untracked", "-m", marker], cwd=cwd)
+        if rc != 0:
+            ui_queue.put(("more_action_result", repo_key, False,
+                          f"Stash failed: {err.strip()}"))
+            return
+        stashed = True
+
+    # Switch to the target branch.
+    rc, _, err = run_git(args, cwd=cwd)
+    if rc != 0:
+        # Roll back our stash so the user is left exactly as before.
+        if stashed:
+            run_git(["stash", "pop"], cwd=cwd)
         ui_queue.put(("more_action_result", repo_key, False,
-                      f"Switch failed: {stderr.strip()}"))
+                      f"Switch failed: {err.strip()}"))
+        return
+
+    # Auto-restore: pop the topmost autostash for the branch we actually landed
+    # on, but only onto a clean tree and never forcing a conflicted pop.
+    target = get_current_branch(cwd)
+    msg = f"Switched to {label}"
+    rc, stash_out, _ = run_git(["stash", "list"], cwd=cwd)
+    ref = find_autostash_ref(stash_out, target) if rc == 0 else None
+    if ref:
+        if get_status(cwd):
+            msg = f"Switched to {label}; stash for {target} kept (tree not clean)"
+        else:
+            rc_p, _, _ = run_git(["stash", "pop", ref], cwd=cwd)
+            if rc_p == 0:
+                msg = f"Switched to {label} (restored stashed changes)"
+            else:
+                msg = (f"Switched to {label}; stashed changes kept "
+                       f"(pop conflict — resolve manually)")
+
+    ui_queue.put(("more_action_result", repo_key, True, msg))
+    bg_refresh_single_repo(repo_key)
 
 
 def cb_create_branch(sender, app_data, user_data):
@@ -3397,6 +3448,49 @@ def process_queue():
                             executor.submit(bg_create_branch, u[0], u[1], True),
                         ),
                         user_data=(repo_key, name, win_tag),
+                    )
+                    dpg.bind_item_theme(proceed_btn, green_btn_theme)
+                    dpg.add_button(
+                        label="Cancel",
+                        callback=lambda s, a, u: (
+                            dpg.delete_item(u) if dpg.does_item_exist(u) else None
+                        ),
+                        user_data=win_tag,
+                    )
+
+        elif kind == "switch_branch_needs_confirm":
+            _, repo_key, label, args, source, n = msg
+            rs = app.repos.get(repo_key)
+            if not rs:
+                continue
+            win_tag = dpg.generate_uuid()
+            with dpg.window(
+                label="Switch branch — stash uncommitted changes?",
+                tag=win_tag,
+                width=480, height=170,
+                no_collapse=True, modal=True,
+                on_close=lambda s, a, u: (
+                    dpg.delete_item(s) if dpg.does_item_exist(s) else None
+                ),
+            ):
+                dpg.add_text(
+                    f"You have {n} uncommitted change(s) on '{source}'.",
+                    color=COL_YELLOW,
+                )
+                dpg.add_text(
+                    f"They'll be stashed (including untracked files) and "
+                    f"restored automatically when you return to '{source}'.",
+                    color=COL_DIM, wrap=440,
+                )
+                dpg.add_spacer(height=8)
+                with dpg.group(horizontal=True):
+                    proceed_btn = dpg.add_button(
+                        label="Stash & switch",
+                        callback=lambda s, a, u: (
+                            dpg.delete_item(u[3]) if dpg.does_item_exist(u[3]) else None,
+                            executor.submit(bg_switch_branch, u[0], u[1], u[2], True),
+                        ),
+                        user_data=(repo_key, label, args, win_tag),
                     )
                     dpg.bind_item_theme(proceed_btn, green_btn_theme)
                     dpg.add_button(
