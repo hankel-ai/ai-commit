@@ -226,6 +226,33 @@ def find_autostash_ref(stash_list_output, branch):
     return None
 
 
+def compute_header_open(*, override, paused, has_activity, force_expand,
+                        preserve_open, has_prior, prior_open):
+    """Decide whether a repo's collapsing header should be open on (re)build.
+
+    Pure decision logic extracted from the GUI so it can be unit-tested.
+
+    ``preserve_open`` is True for *partial* rebuilds (e.g. single-repo refresh,
+    refresh-then-generate) where the user's current expand/collapse state must
+    survive the rebuild — repos must NOT be auto-collapsed. It is False for
+    *full* refreshes (the automatic poll loop or a manual Refresh-all), which
+    are the only cases where the activity-based default is (re)applied.
+
+    Precedence:
+      1. force-pause override → always collapsed (explicit user setting)
+      2. globally paused (unless force-active or force-expand) → collapsed
+      3. preserve_open with a known prior state → keep the prior state
+      4. otherwise → open iff the repo has activity
+    """
+    if override == "pause":
+        return False
+    if paused and override != "active" and not force_expand:
+        return False
+    if preserve_open and not force_expand and has_prior:
+        return prior_open
+    return has_activity
+
+
 def get_last_commit(cwd):
     """Return (full_message, short_date) for HEAD, or ("", "")."""
     # Fetch date separately to avoid delimiter issues with commit body
