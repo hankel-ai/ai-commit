@@ -76,6 +76,7 @@ from ai_commit_core import (
     STATUS_LABELS,
     KiroCliError,
     OllamaError,
+    compute_header_open,
     default_config,
     discover_repos,
     find_autostash_ref,
@@ -2050,8 +2051,16 @@ def _repo_base_label(rs):
     return label
 
 
-def build_repo_section(rs, parent, label_width=0):
-    """Build the UI section for a single repo inside *parent*."""
+def build_repo_section(rs, parent, label_width=0, preserve_open=False,
+                       prior_open=None):
+    """Build the UI section for a single repo inside *parent*.
+
+    When *preserve_open* is True (partial rebuilds such as a single-repo
+    refresh), the header's open/collapse state is taken from *prior_open*
+    (keyed by repo path) so repos are not auto-collapsed. On full refreshes
+    (poll loop / Refresh-all) preserve_open is False and the activity-based
+    default applies.
+    """
     change_count = len(rs.entries)
     label = _repo_base_label(rs)
     show_account = rs.github_account and rs.github_account != app.active_gh_account
@@ -2076,12 +2085,16 @@ def build_repo_section(rs, parent, label_width=0):
     force_expand = repo_key in app.expand_on_next_build
     if force_expand:
         app.expand_on_next_build.discard(repo_key)
-    if override == "pause":
-        should_open = False
-    elif app.paused and override != "active" and not force_expand:
-        should_open = False
-    else:
-        should_open = has_activity
+    has_prior = bool(preserve_open) and prior_open is not None and repo_key in prior_open
+    should_open = compute_header_open(
+        override=override,
+        paused=app.paused,
+        has_activity=has_activity,
+        force_expand=force_expand,
+        preserve_open=bool(preserve_open),
+        has_prior=has_prior,
+        prior_open=prior_open.get(repo_key) if has_prior else False,
+    )
 
     rs.header_tag = dpg.add_collapsing_header(
         label=label,
@@ -2240,12 +2253,21 @@ def build_repo_section(rs, parent, label_width=0):
         rs.input_tag = 0
 
 
-def build_non_git_section(ngf, parent):
-    """Build a minimal UI section for a non-git folder with an Init button."""
+def build_non_git_section(ngf, parent, preserve_open=False, prior_open=None):
+    """Build a minimal UI section for a non-git folder with an Init button.
+
+    Like repos, a user-expanded folder keeps its open state across partial
+    rebuilds when *preserve_open* is True (state taken from *prior_open*,
+    keyed by folder path).
+    """
+    ngf_key = str(ngf.path)
+    default_open = False
+    if preserve_open and prior_open is not None and ngf_key in prior_open:
+        default_open = prior_open[ngf_key]
     ngf.header_tag = dpg.add_collapsing_header(
         label=f"{ngf.name}  (not a git repo)",
         parent=parent,
-        default_open=False,
+        default_open=default_open,
     )
     with dpg.group(horizontal=True, parent=ngf.header_tag):
         term_btn = dpg.add_button(
@@ -2805,13 +2827,31 @@ def _non_git_for_rebuild():
     return {k: {"path": ngf.path, "name": ngf.name} for k, ngf in app.non_git_folders.items()}
 
 
-def rebuild_repos_ui(results, non_git_results=None, clear_errors=False):
+def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
+                     preserve_open=False):
     """Rebuild repo sections from poll results.
 
     If a repo's file list changed since last poll, its pending commit message
     is erased (and auto-generated again if that setting is on).  If the files
     are unchanged, the existing message is preserved.
+
+    *preserve_open* keeps each header's current expand/collapse state across the
+    rebuild. It is True for partial rebuilds (single-repo refresh / refresh-then-
+    generate) so repos are not auto-collapsed, and False for full refreshes (the
+    automatic poll loop and manual Refresh-all), which reapply the activity
+    default. See compute_header_open() in ai_commit_core.
     """
+    # Capture current open/collapse state before the headers are destroyed so a
+    # partial rebuild can restore it (keyed by path).
+    prior_open = {}
+    if preserve_open:
+        for rs in app.repos.values():
+            if rs.header_tag and dpg.does_item_exist(rs.header_tag):
+                prior_open[str(rs.path)] = dpg.get_value(rs.header_tag)
+        for ngf in app.non_git_folders.values():
+            if ngf.header_tag and dpg.does_item_exist(ngf.header_tag):
+                prior_open[str(ngf.path)] = dpg.get_value(ngf.header_tag)
+
     preserved = {}  # name -> (message, gen_status, error_message)
     for name, rs in app.repos.items():
         msg = ""
@@ -2917,11 +2957,13 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False):
 
     # Render git repos first (sorted), then non-git folders at the bottom
     for rs in sorted(new_repos.values(), key=lambda r: r.name.lower()):
-        build_repo_section(rs, "repos_container", label_width=label_width)
+        build_repo_section(rs, "repos_container", label_width=label_width,
+                           preserve_open=preserve_open, prior_open=prior_open)
 
     if app.show_non_git_folders:
         for ngf in sorted(new_non_git.values(), key=lambda n: str(n.path).lower()):
-            build_non_git_section(ngf, "repos_container")
+            build_non_git_section(ngf, "repos_container",
+                                  preserve_open=preserve_open, prior_open=prior_open)
 
     app.repos = new_repos
     app.non_git_folders = new_non_git
@@ -3104,7 +3146,7 @@ def process_queue():
                     "behind": rs.behind,
                 }
             merged[repo_name] = info
-            rebuild_repos_ui(merged, _non_git_for_rebuild())
+            rebuild_repos_ui(merged, _non_git_for_rebuild(), preserve_open=True)
 
         elif kind == "refresh_then_generate":
             _, repo_name, info = msg
@@ -3130,7 +3172,7 @@ def process_queue():
                     "behind": rs.behind,
                 }
             merged[repo_name] = info
-            rebuild_repos_ui(merged, _non_git_for_rebuild())
+            rebuild_repos_ui(merged, _non_git_for_rebuild(), preserve_open=True)
             # Now kick off generation if there are still changes
             rs = app.repos.get(repo_name)
             if rs and rs.entries:
