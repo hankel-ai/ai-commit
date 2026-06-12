@@ -865,20 +865,23 @@ def cb_open_activity_log(sender=None, app_data=None):
 
 
 def _spawn_viewer_process(payload):
-    """Write payload to a temp JSON file and launch gh_workflow_viewer.py."""
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False,
-        dir=tempfile.gettempdir(),
-    )
-    json.dump(payload, tmp)
-    tmp.close()
+    """Launch gh_workflow_viewer.py, piping the payload JSON via stdin.
+
+    The payload contains the gh auth token, so it must never touch disk — a
+    temp file would outlive us if the viewer failed to start.
+    """
     viewer = str(Path(__file__).resolve().parent / "gh_workflow_viewer.py")
     exe = sys.executable
     if sys.platform == "win32" and exe.lower().endswith("python.exe"):
         pw = exe[:-len("python.exe")] + "pythonw.exe"
         if os.path.isfile(pw):
             exe = pw
-    subprocess.Popen([exe, viewer, tmp.name])
+    proc = subprocess.Popen(
+        [exe, viewer, "-"],
+        stdin=subprocess.PIPE,
+    )
+    proc.stdin.write(json.dumps(payload).encode("utf-8"))
+    proc.stdin.close()
 
 
 def _launch_workflow_viewer(repo_name, rs):
@@ -1578,7 +1581,7 @@ def cb_open_terminal(sender, app_data, user_data):
     if sys.platform == "darwin":
         subprocess.Popen(["open", "-a", "Terminal", path])
     elif sys.platform == "win32":
-        subprocess.Popen(["cmd.exe", "/k", f"cd /d {path}"], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        subprocess.Popen(["cmd.exe", "/k", f'cd /d "{path}"'], creationflags=subprocess.CREATE_NEW_CONSOLE)
     else:
         subprocess.Popen(["x-terminal-emulator", "--working-directory", path])
 
