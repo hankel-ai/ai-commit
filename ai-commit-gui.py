@@ -72,6 +72,7 @@ import dearpygui.dearpygui as dpg
 
 import webbrowser
 
+import activity_log
 from ai_commit_core import (
     STATUS_LABELS,
     KiroCliError,
@@ -799,6 +800,10 @@ def bg_generate_message(repo_name):
             ui_queue.put(("gen_result", repo_name, "", "No diff content available."))
             return
         config = {"provider": app.provider, "model": app.model, "url": app.ollama_url}
+        activity_log.log_event(
+            f"Generate commit message ({app.provider}/{app.model})",
+            repo=repo_name, category=activity_log.CAT_AI,
+        )
         msg = generate_message(diff, config)
         ui_queue.put(("gen_result", repo_name, msg, ""))
     except (OllamaError, KiroCliError) as exc:
@@ -813,6 +818,7 @@ def bg_pull(repo_name):
     if not rs:
         return
     try:
+        activity_log.log_event("Pull", repo=repo_name)
         ok, detail = do_pull(rs.path)
         ui_queue.put(("pull_result", repo_name, ok, detail))
     except Exception as exc:
@@ -829,6 +835,33 @@ def bg_preview_pull(repo_name):
         ui_queue.put(("preview_pull_result", repo_name, commits, diffstat))
     except Exception as exc:
         ui_queue.put(("preview_pull_result", repo_name, "", str(exc)))
+
+
+def _launch_activity_viewer():
+    """Open the standalone activity-log viewer window (separate OS process).
+
+    The viewer tails the shared JSONL log file, so multiple things the app does
+    show up live. Mirrors the gh_workflow_viewer launch pattern (pythonw on
+    Windows so no console window flashes).
+    """
+    viewer = str(Path(__file__).resolve().parent / "activity_log_viewer.py")
+    exe = sys.executable
+    if sys.platform == "win32" and exe.lower().endswith("python.exe"):
+        pw = exe[:-len("python.exe")] + "pythonw.exe"
+        if os.path.isfile(pw):
+            exe = pw
+    try:
+        subprocess.Popen([exe, viewer, str(activity_log.LOG_PATH)])
+        activity_log.log_event("Opened activity log viewer")
+    except Exception as exc:
+        activity_log.log_event(
+            "Failed to open activity log viewer", detail=str(exc),
+            category=activity_log.CAT_ERROR,
+        )
+
+
+def cb_open_activity_log(sender=None, app_data=None):
+    _launch_activity_viewer()
 
 
 def _spawn_viewer_process(payload):
@@ -907,6 +940,7 @@ def bg_commit_and_push(repo_name, message):
             if current != rs.gen_entries:
                 ui_queue.put(("commit_result", repo_name, False, False, "STALE"))
                 return
+        activity_log.log_event("Commit and push", repo=repo_name)
         committed, pushed, detail = do_commit_and_push(rs.path, message)
         ui_queue.put(("commit_result", repo_name, committed, pushed, detail))
     except Exception as exc:
@@ -3610,6 +3644,13 @@ def main():
 
     _acquire_instance_lock()
     args = parse_args()
+
+    # Start a fresh activity log for this session and route every git command
+    # run under the hood through it so the Activity Log viewer can show them live.
+    activity_log.clear_file()
+    activity_log.install_git_logger()
+    activity_log.log_event("ai-commit GUI started")
+
     app.model = args.model
     app.provider = args.provider
     app.ollama_url = args.url
@@ -3741,6 +3782,7 @@ def main():
             dpg.add_button(label="Refresh", callback=cb_refresh)
             dpg.add_button(label="Pause", tag="pause_btn", callback=cb_pause)
             dpg.add_button(label="Settings", callback=cb_open_settings)
+            dpg.add_button(label="Activity Log", callback=cb_open_activity_log)
             dpg.add_spacer(width=10)
             dpg.add_text("", tag="gh_account_label", color=COL_GREEN)
             dpg.add_spacer(width=10)

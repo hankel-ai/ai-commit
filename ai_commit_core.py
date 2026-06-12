@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -36,11 +37,25 @@ class OllamaError(Exception):
 # Git helpers
 # ---------------------------------------------------------------------------
 
+# Optional callback invoked after every git command, for the activity log.
+# Signature: fn(args, cwd, rc, duration_ms, stderr). Left unset by default so the
+# core stays dependency-light and unit-testable without the GUI; the GUI installs
+# it at startup via activity_log.install_git_logger().
+_GIT_LOGGER = None
+
+
+def set_git_logger(fn):
+    """Register (or clear, with None) the per-command git logging callback."""
+    global _GIT_LOGGER
+    _GIT_LOGGER = fn
+
+
 def run_git(args, cwd):
     """Run a git command and return (returncode, stdout, stderr)."""
     kwargs = {}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    start = time.perf_counter()
     result = subprocess.run(
         ["git"] + args,
         cwd=cwd,
@@ -50,6 +65,15 @@ def run_git(args, cwd):
         errors="replace",
         **kwargs,
     )
+    if _GIT_LOGGER is not None:
+        try:
+            _GIT_LOGGER(
+                args, cwd, result.returncode,
+                int((time.perf_counter() - start) * 1000),
+                result.stderr,
+            )
+        except Exception:
+            pass
     return result.returncode, result.stdout, result.stderr
 
 
