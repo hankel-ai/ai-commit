@@ -561,17 +561,24 @@ class Viewer:
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: gh_workflow_viewer.py <data.json>")
+        print("Usage: gh_workflow_viewer.py <data.json | ->")
         sys.exit(1)
 
-    data_path = Path(sys.argv[1])
-    try:
-        data = json.loads(data_path.read_text())
-    finally:
+    if sys.argv[1] == "-":
+        # Payload (including the gh auth token) arrives via stdin so the
+        # token never touches disk. Under pythonw sys.stdin can be None even
+        # when the parent passed a pipe — fall back to fd 0 directly.
+        stream = sys.stdin.buffer if sys.stdin else open(0, "rb")
+        data = json.loads(stream.read().decode("utf-8"))
+    else:
+        data_path = Path(sys.argv[1])
         try:
-            data_path.unlink()
-        except OSError:
-            pass
+            data = json.loads(data_path.read_text())
+        finally:
+            try:
+                data_path.unlink()
+            except OSError:
+                pass
 
     viewer = Viewer(
         owner=data["owner"],

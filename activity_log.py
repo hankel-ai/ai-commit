@@ -12,6 +12,7 @@ pulling in Dear PyGui.
 """
 
 import json
+import re
 import tempfile
 import threading
 import time
@@ -27,6 +28,18 @@ CAT_AI = "ai"
 CAT_ERROR = "error"
 
 _MAX_BUFFER = 2000
+
+# URL userinfo (https://user:token@host or https://token@host). Git echoes the
+# remote URL in push/fetch errors, so PAT-embedded remotes would otherwise
+# land verbatim in the on-disk log.
+_URL_CREDENTIAL_RE = re.compile(r"://[^/@\s]+@")
+
+
+def redact_credentials(text):
+    """Mask credentials embedded in URLs before the text is persisted."""
+    if not text:
+        return text
+    return _URL_CREDENTIAL_RE.sub("://***@", text)
 
 _lock = threading.Lock()
 _buffer = []        # in-memory ring buffer of entry dicts
@@ -58,8 +71,8 @@ def _make_entry(category, message, repo=None, detail=None, rc=None,
         "ts": time.time(),
         "category": category,
         "repo": repo,
-        "message": message,
-        "detail": detail,
+        "message": redact_credentials(message),
+        "detail": redact_credentials(detail),
         "rc": rc,
         "duration_ms": duration_ms,
     }

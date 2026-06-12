@@ -1,8 +1,10 @@
 """Shared logic for AI commit message generation — used by both CLI and GUI."""
 
+import fnmatch
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 import urllib.error
@@ -20,6 +22,23 @@ SYSTEM_PROMPT = (
 )
 
 MAX_DIFF_CHARS = 8000
+
+# Untracked files whose basename matches any of these patterns have their
+# content withheld from the LLM prompt — the diff sent to the AI provider may
+# leave the machine (e.g. Ollama cloud models), and files like these tend to
+# hold credentials that aren't gitignored yet.
+SENSITIVE_FILE_PATTERNS = (
+    ".env", ".env.*", "*.pem", "*.key", "*.pfx", "*.p12", "*.jks",
+    "*.keystore", "*.kdbx", "*.tfvars", "id_rsa*", "id_ed25519*", "id_ecdsa*",
+    "credentials", "credentials.*", "*secret*", ".netrc", ".npmrc", ".pypirc",
+    "*.htpasswd", "kubeconfig", "*.kubeconfig",
+)
+
+
+def is_sensitive_filename(filepath):
+    """True if the file's basename matches a known secret-bearing pattern."""
+    name = Path(filepath).name.lower()
+    return any(fnmatch.fnmatch(name, pat) for pat in SENSITIVE_FILE_PATTERNS)
 
 STATUS_LABELS = {
     "M": "modified", "A": "added", "D": "deleted", "R": "renamed",
@@ -438,7 +457,18 @@ def get_diff(cwd):
         if not filepath:
             continue
         full = Path(cwd) / filepath
+        # Never follow symlinks — a link pointing outside the repo would leak
+        # its target's content into the prompt.
+        if full.is_symlink():
+            parts.append(f"--- /dev/null\n+++ b/{filepath}\n(new symlink, content not included)")
+            continue
         if full.is_file():
+            if is_sensitive_filename(filepath):
+                parts.append(
+                    f"--- /dev/null\n+++ b/{filepath}\n"
+                    "(new file, content withheld - filename matches secret pattern)"
+                )
+                continue
             try:
                 content = full.read_text(encoding="utf-8", errors="replace")
                 parts.append(f"--- /dev/null\n+++ b/{filepath}\n(new file)\n{content}")
@@ -530,10 +560,12 @@ def generate_message_kiro(diff, model):
         else:
             wsl_path = win_path
 
-        # Pipe file content into kiro-cli stdin (avoids bash arg-length limits)
+        # Pipe file content into kiro-cli stdin (avoids bash arg-length limits).
+        # shlex.quote both values — they end up inside a bash -lc string, so an
+        # unquoted model name from settings/env could inject shell commands.
         bash_cmd = (
-            f"cat '{wsl_path}' | "
-            f"kiro-cli chat --no-interactive --model {model} 2>/dev/null"
+            f"cat {shlex.quote(wsl_path)} | "
+            f"kiro-cli chat --no-interactive --model {shlex.quote(model)} 2>/dev/null"
         )
         cmd = ["wsl", "--", "bash", "-lc", bash_cmd]
 
