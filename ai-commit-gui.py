@@ -2410,14 +2410,14 @@ def bg_fetch_more_data(repo_key):
         seen_short = set(local_branches)
         for line in stdout.splitlines():
             full_ref = line.strip()
-            # Skip blanks and HEAD pointers like "origin/HEAD -> origin/main"
+            # Skip blanks, HEAD pointers, and symbolic refs like origin/HEAD
             if not full_ref or "->" in full_ref:
                 continue
             parts = full_ref.split("/", 1)
             if len(parts) != 2:
                 continue
             remote_name, short = parts
-            if not short or short in seen_short:
+            if not short or short == "HEAD" or short in seen_short:
                 continue
             seen_short.add(short)
             label = f"{short}  (remote: {remote_name})"
