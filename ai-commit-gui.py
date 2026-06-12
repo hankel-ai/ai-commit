@@ -1581,7 +1581,7 @@ def cb_open_terminal(sender, app_data, user_data):
     if sys.platform == "darwin":
         subprocess.Popen(["open", "-a", "Terminal", path])
     elif sys.platform == "win32":
-        subprocess.Popen(["cmd.exe", "/k", f'cd /d "{path}"'], creationflags=subprocess.CREATE_NEW_CONSOLE)
+        subprocess.Popen(["cmd.exe", "/k"], creationflags=subprocess.CREATE_NEW_CONSOLE, cwd=path)
     else:
         subprocess.Popen(["x-terminal-emulator", "--working-directory", path])
 
