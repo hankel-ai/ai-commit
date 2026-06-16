@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -69,21 +70,46 @@ def set_git_logger(fn):
     _GIT_LOGGER = fn
 
 
+# Per-repo serialization. The GUI runs git on a thread pool plus a polling loop,
+# so two commands can hit the same repo at once — one then fails on `index.lock`
+# and (via get_status returning [] on error) can be misread as a clean tree,
+# bypassing the branch-switch confirm gate. A lock per repo dir guarantees only
+# one git command runs in a given repo at a time. Locks are leaf-level (run_git
+# never calls run_git), so a plain Lock can't deadlock.
+_REPO_LOCKS = {}
+_REPO_LOCKS_GUARD = threading.Lock()
+
+
+def _repo_lock(cwd):
+    key = os.path.normcase(os.path.abspath(str(cwd))) if cwd else ""
+    with _REPO_LOCKS_GUARD:
+        lock = _REPO_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _REPO_LOCKS[key] = lock
+        return lock
+
+
 def run_git(args, cwd):
-    """Run a git command and return (returncode, stdout, stderr)."""
+    """Run a git command and return (returncode, stdout, stderr).
+
+    Serialized per repo dir (see ``_repo_lock``) so concurrent app threads can't
+    collide on the same repo's index.
+    """
     kwargs = {}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     start = time.perf_counter()
-    result = subprocess.run(
-        ["git"] + args,
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **kwargs,
-    )
+    with _repo_lock(cwd):
+        result = subprocess.run(
+            ["git"] + args,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **kwargs,
+        )
     if _GIT_LOGGER is not None:
         try:
             _GIT_LOGGER(
@@ -111,11 +137,17 @@ def _unquote_path(p):
     return p
 
 
-def get_status(cwd):
-    """Return list of (status_code, filepath) tuples from git status --porcelain."""
+def read_status(cwd):
+    """Run ``git status --porcelain`` and return ``(ok, entries)``.
+
+    ``ok`` is False when git itself failed (non-zero exit — e.g. a concurrent op
+    held ``index.lock``), which is NOT the same as a clean tree. Callers that
+    make destructive decisions (branch switch) must treat ``ok=False`` as
+    "unknown" and refuse to proceed, never as "clean".
+    """
     rc, stdout, _ = run_git(["status", "--porcelain"], cwd=cwd)
     if rc != 0:
-        return []
+        return False, []
     entries = []
     for line in stdout.splitlines():
         if len(line) < 4:
@@ -123,6 +155,16 @@ def get_status(cwd):
         code = line[:2].strip()
         filepath = _unquote_path(line[3:])
         entries.append((code, filepath))
+    return True, entries
+
+
+def get_status(cwd):
+    """Return list of (status_code, filepath) tuples from git status --porcelain.
+
+    Returns ``[]`` on git failure (indistinguishable from a clean tree). Callers
+    that must tell those two apart should use :func:`read_status` instead.
+    """
+    _ok, entries = read_status(cwd)
     return entries
 
 

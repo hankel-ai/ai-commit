@@ -97,6 +97,7 @@ from ai_commit_core import (
     get_remote_url,
     get_status,
     get_sync_status,
+    read_status,
     is_git_repo,
     run_git,
 )
@@ -2542,7 +2543,16 @@ def bg_switch_branch(repo_key, label, args, confirmed=False):
     cwd = str(rs.path)
     source = get_current_branch(cwd)
     detached = source in ("", "HEAD")
-    entries = get_status(cwd)
+    ok, entries = read_status(cwd)
+
+    # Fail safe: if the working tree can't be read (git busy / error), a failed
+    # status must NOT be mistaken for a clean tree — that would skip the confirm
+    # gate and switch without stashing. Abort and let the user retry.
+    if not ok:
+        ui_queue.put(("more_action_result", repo_key, False,
+                      "Switch aborted: couldn't read the working tree "
+                      "(git busy). Try again."))
+        return
 
     # Confirm gate: only when there's something to stash on a real branch.
     if entries and not detached and not confirmed:
@@ -2620,7 +2630,12 @@ def bg_create_branch(repo_key, name, confirmed):
     if not rs:
         return
     cwd = str(rs.path)
-    entries = get_status(cwd)
+    ok, entries = read_status(cwd)
+    if not ok:
+        ui_queue.put(("more_action_result", repo_key, False,
+                      "Create aborted: couldn't read the working tree "
+                      "(git busy). Try again."))
+        return
     if entries and not confirmed:
         ui_queue.put(("create_branch_needs_confirm", repo_key, name, len(entries)))
         return
