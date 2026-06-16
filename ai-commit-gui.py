@@ -89,8 +89,6 @@ from ai_commit_core import (
     get_current_branch,
     get_diff,
     get_git_global_user,
-    get_git_user,
-    get_git_user_local_override,
     get_github_account,
     get_head_sha,
     get_incoming_changes,
@@ -257,12 +255,7 @@ class RepoState:
     gen_status: GenStatus = GenStatus.IDLE
     error_message: str = ""
     remote_url: str = ""
-    git_user: str = ""
     github_account: str = ""
-    local_name: str = ""
-    local_email: str = ""
-    effective_name: str = ""
-    effective_email: str = ""
     visibility: str = ""
     branch: str = ""
     branch_status: str = ""  # "", "local only", or "stale"
@@ -305,8 +298,6 @@ class AppState:
     chime_on_completion: bool = False
     show_non_git_folders: bool = True
     active_gh_account: str = ""
-    global_git_name: str = ""
-    global_git_email: str = ""
     non_git_folders: dict = field(default_factory=dict)
     repo_overrides: dict = field(default_factory=dict)  # repo_key -> "pause" or "active"
     expand_on_next_build: set = field(default_factory=set)  # repo_keys to auto-expand on next UI rebuild (used when paused + single-repo Refresh)
@@ -627,7 +618,7 @@ def create_button_theme(color):
 def bg_poll_repos(force=False):
     """Discover repos and get status for each. Posts results to ui_queue.
 
-    When *force* is True, bypass cached remote_url/git_user and always run a
+    When *force* is True, bypass cached remote_url and always run a
     network fetch — same behavior as a fresh startup. Used by the manual
     Refresh button so a moved remote is picked up without restarting.
     """
@@ -672,13 +663,8 @@ def bg_poll_repos(force=False):
                     "path": rp,
                     "entries": existing.entries,
                     "remote_url": existing.remote_url,
-                    "git_user": existing.git_user,
                     "github_account": existing.github_account,
                     "visibility": existing.visibility,
-                    "local_name": existing.local_name,
-                    "local_email": existing.local_email,
-                    "effective_name": existing.effective_name,
-                    "effective_email": existing.effective_email,
                     "branch": existing.branch,
                     "branch_status": existing.branch_status,
                     "last_commit_msg": existing.last_commit_msg,
@@ -696,20 +682,11 @@ def bg_poll_repos(force=False):
                 remote_url = existing.remote_url
             else:
                 remote_url = get_remote_url(rp)
-            if not repo_force and existing and existing.git_user:
-                git_user = existing.git_user
-            else:
-                git_user = get_git_user(rp)
             github_account = get_github_account(remote_url)
             if not repo_force and existing and existing.visibility:
                 visibility = existing.visibility
             else:
                 visibility = get_repo_visibility(rp) if remote_url else ""
-            local_name, local_email = get_git_user_local_override(rp)
-            rc_n, eff_name_raw, _ = run_git(["config", "user.name"], cwd=str(rp))
-            rc_e, eff_email_raw, _ = run_git(["config", "user.email"], cwd=str(rp))
-            effective_name = eff_name_raw.strip() if rc_n == 0 else ""
-            effective_email = eff_email_raw.strip() if rc_e == 0 else ""
             branch = get_current_branch(rp)
             ahead, behind = get_sync_status(rp, fetch=is_new or repo_force)
             branch_status = get_branch_classification(rp).get(branch, "")
@@ -717,13 +694,8 @@ def bg_poll_repos(force=False):
                 "path": rp,
                 "entries": entries,
                 "remote_url": remote_url,
-                "git_user": git_user,
                 "github_account": github_account,
                 "visibility": visibility,
-                "local_name": local_name,
-                "local_email": local_email,
-                "effective_name": effective_name,
-                "effective_email": effective_email,
                 "branch": branch,
                 "branch_status": branch_status,
                 "last_commit_msg": last_msg,
@@ -740,7 +712,7 @@ def bg_poll_repos(force=False):
 def bg_refresh_single_repo(repo_name, force=False):
     """Re-poll a single repo and post its updated info to ui_queue.
 
-    When *force* is True, bypass cached remote_url/git_user/visibility and
+    When *force* is True, bypass cached remote_url/visibility and
     always run git fetch — same as the initial load or manual Refresh.
     """
     rs = app.repos.get(repo_name)
@@ -752,20 +724,13 @@ def bg_refresh_single_repo(repo_name, force=False):
     last_msg, last_date = get_last_commit(rp)
     if force:
         remote_url = get_remote_url(rp)
-        git_user = get_git_user(rp)
     else:
         remote_url = rs.remote_url or get_remote_url(rp)
-        git_user = rs.git_user or get_git_user(rp)
     github_account = get_github_account(remote_url)
     if force:
         visibility = get_repo_visibility(rp) if remote_url else ""
     else:
         visibility = rs.visibility or (get_repo_visibility(rp) if remote_url else "")
-    local_name, local_email = get_git_user_local_override(rp)
-    rc_n, eff_name_raw, _ = run_git(["config", "user.name"], cwd=str(rp))
-    rc_e, eff_email_raw, _ = run_git(["config", "user.email"], cwd=str(rp))
-    effective_name = eff_name_raw.strip() if rc_n == 0 else ""
-    effective_email = eff_email_raw.strip() if rc_e == 0 else ""
     branch = get_current_branch(rp)
     ahead, behind = get_sync_status(rp)
     branch_status = get_branch_classification(rp).get(branch, "")
@@ -773,13 +738,8 @@ def bg_refresh_single_repo(repo_name, force=False):
         "path": rp,
         "entries": entries,
         "remote_url": remote_url,
-        "git_user": git_user,
         "github_account": github_account,
         "visibility": visibility,
-        "local_name": local_name,
-        "local_email": local_email,
-        "effective_name": effective_name,
-        "effective_email": effective_email,
         "branch": branch,
         "branch_status": branch_status,
         "last_commit_msg": last_msg,
@@ -975,14 +935,8 @@ def bg_refresh_then_generate(repo_name):
     entries = get_status(rp)
     last_msg, last_date = get_last_commit(rp)
     remote_url = rs.remote_url or get_remote_url(rp)
-    git_user = rs.git_user or get_git_user(rp)
     github_account = get_github_account(remote_url)
     visibility = rs.visibility or (get_repo_visibility(rp) if remote_url else "")
-    local_name, local_email = get_git_user_local_override(rp)
-    rc_n, eff_name_raw, _ = run_git(["config", "user.name"], cwd=str(rp))
-    rc_e, eff_email_raw, _ = run_git(["config", "user.email"], cwd=str(rp))
-    effective_name = eff_name_raw.strip() if rc_n == 0 else ""
-    effective_email = eff_email_raw.strip() if rc_e == 0 else ""
     branch = get_current_branch(rp)
     ahead, behind = get_sync_status(rp, fetch=False)
     branch_status = get_branch_classification(rp).get(branch, "")
@@ -990,13 +944,8 @@ def bg_refresh_then_generate(repo_name):
         "path": rp,
         "entries": entries,
         "remote_url": remote_url,
-        "git_user": git_user,
         "github_account": github_account,
         "visibility": visibility,
-        "local_name": local_name,
-        "local_email": local_email,
-        "effective_name": effective_name,
-        "effective_email": effective_email,
         "branch": branch,
         "branch_status": branch_status,
         "last_commit_msg": last_msg,
@@ -1190,7 +1139,7 @@ def cb_browse(sender, app_data):
 
 
 def cb_refresh(sender, app_data):
-    # Manual Refresh = forced poll: re-read remote_url/git_user and fetch,
+    # Manual Refresh = forced poll: re-read remote_url and fetch,
     # matching what startup does. Otherwise a moved remote stays cached.
     trigger_poll(force=True)
 
@@ -2149,17 +2098,6 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
     elif override == "active":
         dpg.bind_item_theme(rs.header_tag, "force_active_header_theme")
 
-    # Show identity mismatch when effective name/email differs from global
-    mismatch_parts = []
-    if rs.effective_name and rs.effective_name != app.global_git_name:
-        mismatch_parts.append(f"name: {rs.effective_name}")
-    if rs.effective_email and rs.effective_email != app.global_git_email:
-        mismatch_parts.append(f"email: {rs.effective_email}")
-    if mismatch_parts:
-        dpg.add_text(
-            f"  !! Using different identity: {', '.join(mismatch_parts)}",
-            color=COL_YELLOW, parent=rs.header_tag)
-
     # Sync warning banner — prominent when behind remote
     if rs.behind > 0 or rs.ahead > 0:
         repo_key = str(rs.path)
@@ -2426,10 +2364,7 @@ def bg_fetch_more_data(repo_key):
                 "checkout", "-b", short, "--track", full_ref,
             ]
 
-    # C. Local config overrides (already known from rs, but re-check live)
-    local_name, local_email = get_git_user_local_override(cwd)
-
-    # D. Dispatchable workflows that apply to the current branch:
+    # C. Dispatchable workflows that apply to the current branch:
     # active + file exists on this branch + has a workflow_dispatch trigger.
     workflows = []
     if rs.remote_url and current_branch:
@@ -2472,8 +2407,6 @@ def bg_fetch_more_data(repo_key):
         "local_branch_names": list(local_branches),
         "deletable": deletable,
         "current_branch": current_branch,
-        "local_name": local_name,
-        "local_email": local_email,
         "workflows": workflows,
     }))
 
@@ -2562,28 +2495,7 @@ def _build_more_panel(rs, repo_key, data):
             )
             dpg.bind_item_theme(del_btn, remove_btn_theme)
 
-    # C. Remove local config override
-    local_name = data.get("local_name", "")
-    local_email = data.get("local_email", "")
-    if local_name or local_email:
-        has_content = True
-        parts = []
-        if local_name:
-            parts.append(f"name={local_name}")
-        if local_email:
-            parts.append(f"email={local_email}")
-        with dpg.group(horizontal=True, parent=parent):
-            dpg.add_text(f"  Local config: {', '.join(parts)}", color=COL_ACCENT)
-            rm_btn = dpg.add_button(
-                label="Remove Override",
-                callback=cb_remove_local_config,
-                user_data=repo_key,
-            )
-            dpg.bind_item_theme(rm_btn, remove_btn_theme)
-    else:
-        dpg.add_text("  Local config override: none", color=COL_DIM, parent=parent)
-
-    # D. Dispatch workflow
+    # C. Dispatch workflow
     workflows = data.get("workflows", [])
     ref = data.get("current_branch", "")
     if workflows:
@@ -2763,21 +2675,6 @@ def bg_delete_branch(repo_key, branch_name, force):
                   f"Delete failed: {err}"))
 
 
-def cb_remove_local_config(sender, app_data, user_data):
-    executor.submit(bg_remove_local_config, user_data)
-
-
-def bg_remove_local_config(repo_key):
-    rs = app.repos.get(repo_key)
-    if not rs:
-        return
-    cwd = str(rs.path)
-    run_git(["config", "--local", "--unset", "user.name"], cwd=cwd)
-    run_git(["config", "--local", "--unset", "user.email"], cwd=cwd)
-    ui_queue.put(("more_action_result", repo_key, True, "Local config removed"))
-    bg_refresh_single_repo(repo_key)
-
-
 def cb_dispatch_workflow(sender, app_data, user_data):
     repo_key, wf_id, wf_name, ref = user_data
     executor.submit(bg_dispatch_workflow, repo_key, wf_id, wf_name, ref)
@@ -2949,13 +2846,8 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
             gen_status=gen,
             error_message=err,
             remote_url=info.get("remote_url", ""),
-            git_user=info.get("git_user", ""),
             github_account=info.get("github_account", ""),
             visibility=info.get("visibility", ""),
-            local_name=info.get("local_name", ""),
-            local_email=info.get("local_email", ""),
-            effective_name=info.get("effective_name", ""),
-            effective_email=info.get("effective_email", ""),
             branch=info.get("branch", ""),
             branch_status=info.get("branch_status", ""),
             last_commit_msg=info.get("last_commit_msg", ""),
@@ -3168,13 +3060,8 @@ def process_queue():
                     "path": rs.path,
                     "entries": rs.entries,
                     "remote_url": rs.remote_url,
-                    "git_user": rs.git_user,
                     "github_account": rs.github_account,
                     "visibility": rs.visibility,
-                    "local_name": rs.local_name,
-                    "local_email": rs.local_email,
-                    "effective_name": rs.effective_name,
-                    "effective_email": rs.effective_email,
                     "branch": rs.branch,
                     "branch_status": rs.branch_status,
                     "last_commit_msg": rs.last_commit_msg,
@@ -3194,13 +3081,8 @@ def process_queue():
                     "path": rs.path,
                     "entries": rs.entries,
                     "remote_url": rs.remote_url,
-                    "git_user": rs.git_user,
                     "github_account": rs.github_account,
                     "visibility": rs.visibility,
-                    "local_name": rs.local_name,
-                    "local_email": rs.local_email,
-                    "effective_name": rs.effective_name,
-                    "effective_email": rs.effective_email,
                     "branch": rs.branch,
                     "branch_status": rs.branch_status,
                     "last_commit_msg": rs.last_commit_msg,
@@ -3776,9 +3658,8 @@ def main():
         # Watched folders
         dpg.add_group(tag="folders_container")
 
+        # Global git identity for the toolbar label (one read at startup).
         _gname, _gemail = get_git_global_user()
-        app.global_git_name = _gname
-        app.global_git_email = _gemail
 
         with dpg.group(horizontal=True):
             dpg.add_button(label="Add Folder", callback=cb_browse)

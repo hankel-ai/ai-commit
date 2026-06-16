@@ -84,10 +84,14 @@ class ActivityViewer:
 
     # -- rendering ----------------------------------------------------------
 
-    def _add_row(self, entry):
+    def _entry_lines(self, entry):
+        """Return (main_line, detail_line_or_None, failed, category) for an entry.
+
+        Shared by row rendering and the clipboard helpers so the copied text
+        matches exactly what is displayed.
+        """
         ts = _fmt_ts(entry.get("ts"))
         cat = entry.get("category", CAT_EVENT)
-        color = _CAT_COLOR.get(cat, COL_WHITE)
         label = _CAT_LABEL.get(cat, cat.upper()[:5])
         repo = entry.get("repo") or ""
         rc = entry.get("rc")
@@ -99,12 +103,29 @@ class ActivityViewer:
         if dur is not None:
             line += f"  ({dur} ms)"
         failed = rc not in (None, 0)
+        detail_line = None
+        detail = entry.get("detail")
+        if failed and detail:
+            detail_line = f"        rc={rc}: {detail}"
+        return line, detail_line, failed, cat
+
+    def _entry_text(self, entry):
+        line, detail_line, _failed, _cat = self._entry_lines(entry)
+        return line if detail_line is None else f"{line}\n{detail_line}"
+
+    def _add_row(self, entry):
+        line, detail_line, failed, cat = self._entry_lines(entry)
+        color = _CAT_COLOR.get(cat, COL_WHITE)
         row_color = COL_RED if failed else color
-        with dpg.group(parent=self._rows_tag):
+        with dpg.group(parent=self._rows_tag) as grp:
             dpg.add_text(line, color=row_color, wrap=0)
-            detail = entry.get("detail")
-            if failed and detail:
-                dpg.add_text(f"        rc={rc}: {detail}", color=COL_RED, wrap=0)
+            if detail_line is not None:
+                dpg.add_text(detail_line, color=COL_RED, wrap=0)
+        # Right-click any row to copy it (or the whole visible view).
+        with dpg.popup(grp, mousebutton=dpg.mvMouseButton_Right):
+            dpg.add_menu_item(label="Copy line", user_data=self._entry_text(entry),
+                              callback=self._cb_copy_line)
+            dpg.add_menu_item(label="Copy all visible", callback=self._cb_copy_all)
 
     def _rebuild(self):
         """Re-render all rows from scratch (after a filter change)."""
@@ -147,6 +168,17 @@ class ActivityViewer:
         """Clear the on-screen view only — does not touch the log file."""
         self._all = []
         self._rebuild()
+
+    def _cb_copy_line(self, sender, app_data, user_data):
+        dpg.set_clipboard_text(user_data or "")
+
+    def _cb_copy_all(self, *args):
+        """Copy every currently-visible (filtered) row to the clipboard."""
+        visible = [e for e in self._all if self._passes(e)][-_MAX_ROWS:]
+        dpg.set_clipboard_text("\n".join(self._entry_text(e) for e in visible))
+        if self._status_tag is not None:
+            dpg.set_value(self._status_tag,
+                          f"copied {len(visible)} row(s) to clipboard")
 
     # -- main loop ----------------------------------------------------------
 
@@ -204,6 +236,7 @@ class ActivityViewer:
                 dpg.add_checkbox(label="Pause", default_value=False,
                                  callback=self._cb_pause)
                 dpg.add_button(label="Clear view", callback=self._cb_clear)
+                dpg.add_button(label="Copy all", callback=self._cb_copy_all)
             dpg.add_input_text(hint="search messages / repos / errors...",
                                width=-1, callback=self._cb_search)
             dpg.add_separator()

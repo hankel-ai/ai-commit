@@ -126,32 +126,12 @@ def get_status(cwd):
     return entries
 
 
-def get_git_user(cwd):
-    """Return 'Name <email>' for the git user configured in this repo."""
-    rc_n, name, _ = run_git(["config", "user.name"], cwd=cwd)
-    rc_e, email, _ = run_git(["config", "user.email"], cwd=cwd)
-    name = name.strip() if rc_n == 0 else ""
-    email = email.strip() if rc_e == 0 else ""
-    if name and email:
-        return f"{name} <{email}>"
-    return name or email or ""
-
-
-def get_git_user_local_override(cwd):
-    """Return (local_name, local_email) if the repo has local config overrides.
-
-    Uses ``--local`` so only values set in ``.git/config`` are returned.
-    Returns empty strings for values that are not locally overridden.
-    """
-    rc_n, name, _ = run_git(["config", "--local", "user.name"], cwd=cwd)
-    rc_e, email, _ = run_git(["config", "--local", "user.email"], cwd=cwd)
-    local_name = name.strip() if rc_n == 0 else ""
-    local_email = email.strip() if rc_e == 0 else ""
-    return local_name, local_email
-
-
 def get_git_global_user():
-    """Return (global_name, global_email) from ``git config --global``."""
+    """Return (global_name, global_email) from ``git config --global``.
+
+    Read once at GUI startup for the toolbar identity label — not per repo,
+    so it doesn't flood the activity log.
+    """
     rc_n, name, _ = run_git(["config", "--global", "user.name"], cwd=".")
     rc_e, email, _ = run_git(["config", "--global", "user.email"], cwd=".")
     global_name = name.strip() if rc_n == 0 else ""
@@ -297,13 +277,18 @@ def compute_header_open(*, override, paused, has_activity, force_expand,
 
 
 def get_last_commit(cwd):
-    """Return (full_message, short_date) for HEAD, or ("", "")."""
-    # Fetch date separately to avoid delimiter issues with commit body
-    rc, date_out, _ = run_git(["log", "-1", "--format=%ci"], cwd=cwd)
+    """Return (full_message, short_date) for HEAD, or ("", "").
+
+    One ``git log`` call: ``%ci`` (a fixed single-line date) on the first line,
+    then ``%B`` (the free-form, possibly multi-line message). Split on only the
+    first newline so the body's own newlines never collide with the date.
+    """
+    rc, out, _ = run_git(["log", "-1", "--format=%ci%n%B"], cwd=cwd)
     if rc != 0:
         return "", ""
+    date_str, _, msg_out = out.partition("\n")
+    date_str = date_str.strip()
     short_date = ""
-    date_str = date_out.strip()
     if date_str:
         try:
             from datetime import datetime
@@ -311,10 +296,7 @@ def get_last_commit(cwd):
             short_date = dt.strftime("%b %d %I:%M%p").replace("AM", "am").replace("PM", "pm")
         except (ValueError, IndexError):
             short_date = date_str[:16]
-    # %B = full commit message (subject + body), strip trailing whitespace
-    rc, msg_out, _ = run_git(["log", "-1", "--format=%B"], cwd=cwd)
-    full_msg = msg_out.strip() if rc == 0 else ""
-    return full_msg, short_date
+    return msg_out.strip(), short_date
 
 
 def get_sync_status(cwd, fetch=True):
