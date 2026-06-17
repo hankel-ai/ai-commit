@@ -17,6 +17,7 @@ def _call(**kw):
         paused=False,
         has_activity=False,
         force_expand=False,
+        force_collapse=False,
         preserve_open=False,
         has_prior=False,
         prior_open=False,
@@ -94,6 +95,30 @@ def test_force_expand_overrides_pause_and_uses_activity():
     assert _call(paused=True, force_expand=True, preserve_open=True,
                  has_prior=True, prior_open=False, has_activity=True) is True
     assert _call(paused=True, force_expand=True, has_activity=False) is False
+
+
+# --- force_collapse (single-repo refresh after Commit & Push) ---
+
+def test_force_collapse_reapplies_activity_default_despite_prior_open():
+    # The Commit & Push fix: the just-committed repo was expanded (prior_open),
+    # but after pushing it has no activity and must collapse even though the
+    # partial rebuild uses preserve_open.
+    assert _call(preserve_open=True, has_prior=True, prior_open=True,
+                 force_collapse=True, has_activity=False) is False
+
+
+def test_force_collapse_still_opens_if_activity_remains():
+    # If work remains (e.g. committed but not pushed → ahead), force_collapse
+    # defers to the activity default and keeps the repo open.
+    assert _call(preserve_open=True, has_prior=True, prior_open=False,
+                 force_collapse=True, has_activity=True) is True
+
+
+def test_force_collapse_does_not_override_force_expand():
+    # force_expand wins; an explicitly force-expanded repo is not collapsed.
+    assert _call(preserve_open=True, has_prior=True, prior_open=False,
+                 force_expand=True, force_collapse=True,
+                 has_activity=True) is True
 
 
 if __name__ == "__main__":

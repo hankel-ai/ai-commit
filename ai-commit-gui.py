@@ -302,6 +302,7 @@ class AppState:
     non_git_folders: dict = field(default_factory=dict)
     repo_overrides: dict = field(default_factory=dict)  # repo_key -> "pause" or "active"
     expand_on_next_build: set = field(default_factory=set)  # repo_keys to auto-expand on next UI rebuild (used when paused + single-repo Refresh)
+    collapse_on_next_build: set = field(default_factory=set)  # repo_keys to re-apply the activity default (collapse if idle) on next UI rebuild, overriding preserve_open (used after Commit & Push)
 
 
 # ---------------------------------------------------------------------------
@@ -2096,12 +2097,16 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
     force_expand = repo_key in app.expand_on_next_build
     if force_expand:
         app.expand_on_next_build.discard(repo_key)
+    force_collapse = repo_key in app.collapse_on_next_build
+    if force_collapse:
+        app.collapse_on_next_build.discard(repo_key)
     has_prior = bool(preserve_open) and prior_open is not None and repo_key in prior_open
     should_open = compute_header_open(
         override=override,
         paused=app.paused,
         has_activity=has_activity,
         force_expand=force_expand,
+        force_collapse=force_collapse,
         preserve_open=bool(preserve_open),
         has_prior=has_prior,
         prior_open=prior_open.get(repo_key) if has_prior else False,
@@ -3010,6 +3015,10 @@ def process_queue():
                     dpg.set_value(rs.input_tag, "")
                 dpg.set_value(rs.status_tag, "Committed & pushed!")
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
+                # Fully synced now — let the upcoming partial rebuild re-apply
+                # the activity default so this (now idle) repo collapses instead
+                # of staying expanded under preserve_open.
+                app.collapse_on_next_build.add(repo_name)
                 executor.submit(bg_refresh_single_repo, repo_name)
                 if app.actions_popup_enabled and rs.remote_url:
                     executor.submit(_launch_workflow_viewer, repo_name, rs)
@@ -3051,6 +3060,8 @@ def process_queue():
                 rs.gen_status = GenStatus.IDLE
                 dpg.set_value(rs.status_tag, "Committed & pushed!")
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
+                # Fully synced now — collapse this idle repo on the next rebuild.
+                app.collapse_on_next_build.add(repo_name)
                 executor.submit(bg_refresh_single_repo, repo_name)
                 if app.actions_popup_enabled and rs.remote_url:
                     executor.submit(_launch_workflow_viewer, repo_name, rs)

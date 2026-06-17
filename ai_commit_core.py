@@ -292,7 +292,8 @@ def find_autostash_ref(stash_list_output, branch):
 
 
 def compute_header_open(*, override, paused, has_activity, force_expand,
-                        preserve_open, has_prior, prior_open):
+                        preserve_open, has_prior, prior_open,
+                        force_collapse=False):
     """Decide whether a repo's collapsing header should be open on (re)build.
 
     Pure decision logic extracted from the GUI so it can be unit-tested.
@@ -303,17 +304,24 @@ def compute_header_open(*, override, paused, has_activity, force_expand,
     *full* refreshes (the automatic poll loop or a manual Refresh-all), which
     are the only cases where the activity-based default is (re)applied.
 
+    ``force_collapse`` is the per-repo opt-out of ``preserve_open`` (mirror of
+    ``force_expand``): set after a successful Commit & Push so the just-pushed
+    repo re-applies the activity-based default (and collapses, having no more
+    activity) on the very next partial rebuild, while every *other* repo keeps
+    its open state.
+
     Precedence:
       1. force-pause override → always collapsed (explicit user setting)
       2. globally paused (unless force-active or force-expand) → collapsed
       3. preserve_open with a known prior state → keep the prior state
+         (unless force_expand or force_collapse re-applies the activity default)
       4. otherwise → open iff the repo has activity
     """
     if override == "pause":
         return False
     if paused and override != "active" and not force_expand:
         return False
-    if preserve_open and not force_expand and has_prior:
+    if preserve_open and not force_expand and not force_collapse and has_prior:
         return prior_open
     return has_activity
 
