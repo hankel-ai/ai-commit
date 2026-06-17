@@ -51,6 +51,7 @@ python ai-commit.py [folder] [--provider ollama] [--model qwen3-coder:480b-cloud
 ## Architecture
 
 - GUI runs a polling loop that discovers git repos **and non-git folders** in watched folders and checks for uncommitted changes
+  - **Paused fast-path**: when globally paused (and not a manual Refresh), `bg_poll_repos` skips the folder rescan entirely — it iterates only the already-known `app.repos`, runs a live `_poll_one_repo` for force-active repos and reuses `_cached_repo_result` for the rest. Avoids a `git rev-parse` (via `is_git_repo`) on every repo each cycle just to rediscover them. New repos surface on Unpause or Refresh. Per-repo poll/cache logic is factored into `_poll_one_repo` / `_cached_repo_result`, shared with the normal discovery loop. Covered by `tests/test_poll_pause.py`.
 - Background tasks (generate, commit+push, pull, poll) run in a `ThreadPoolExecutor` and post results to a `queue.Queue`
 - Main thread processes the queue each frame and updates Dear PyGui widgets
 - `RepoState` dataclass tracks per-repo UI state (tags, entries, status, messages); `NonGitFolder` dataclass for non-git directories

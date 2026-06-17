@@ -616,6 +616,56 @@ def create_button_theme(color):
 # Background tasks
 # ---------------------------------------------------------------------------
 
+def _cached_repo_result(rp, existing):
+    """Reuse a repo's last-known data when we intentionally skip re-polling it."""
+    return {
+        "path": rp,
+        "entries": existing.entries,
+        "remote_url": existing.remote_url,
+        "github_account": existing.github_account,
+        "visibility": existing.visibility,
+        "branch": existing.branch,
+        "branch_status": existing.branch_status,
+        "last_commit_msg": existing.last_commit_msg,
+        "last_commit_date": existing.last_commit_date,
+        "ahead": existing.ahead,
+        "behind": existing.behind,
+    }
+
+
+def _poll_one_repo(rp, existing, repo_force, force):
+    """Run a live git poll for a single repo and return its result dict."""
+    ui_queue.put(("repo_loading", str(rp), rp.name))
+    entries = get_status(rp)
+    last_msg, last_date = get_last_commit(rp)
+    is_new = existing is None
+    if not repo_force and existing and existing.remote_url:
+        remote_url = existing.remote_url
+    else:
+        remote_url = get_remote_url(rp)
+    github_account = get_github_account(remote_url)
+    if not repo_force and existing and existing.visibility:
+        visibility = existing.visibility
+    else:
+        visibility = get_repo_visibility(rp) if remote_url else ""
+    branch = get_current_branch(rp)
+    ahead, behind = get_sync_status(rp, fetch=is_new or repo_force)
+    branch_status = get_branch_classification(rp).get(branch, "")
+    return {
+        "path": rp,
+        "entries": entries,
+        "remote_url": remote_url,
+        "github_account": github_account,
+        "visibility": visibility,
+        "branch": branch,
+        "branch_status": branch_status,
+        "last_commit_msg": last_msg,
+        "last_commit_date": last_date,
+        "ahead": ahead,
+        "behind": behind,
+    }
+
+
 def bg_poll_repos(force=False):
     """Discover repos and get status for each. Posts results to ui_queue.
 
@@ -628,6 +678,20 @@ def bg_poll_repos(force=False):
 
     results = {}
     non_git_results = {}
+
+    # While globally paused (and not a manual Refresh), skip the folder rescan —
+    # it runs `git rev-parse` on every repo just to rediscover them. Poll only
+    # the force-active repos from the already-known set and reuse cached data for
+    # the rest so they stay in the UI. New repos surface on Unpause or Refresh.
+    if app.paused and not force:
+        for repo_key, existing in list(app.repos.items()):
+            if app.repo_overrides.get(repo_key, "") == "active":
+                results[repo_key] = _poll_one_repo(existing.path, existing, True, force)
+            else:
+                results[repo_key] = _cached_repo_result(existing.path, existing)
+        ui_queue.put(("poll_result", results, _non_git_for_rebuild(), force))
+        return
+
     for folder in app.watched_folders:
         folder_path = Path(folder).resolve()
         if not folder_path.is_dir():
@@ -660,50 +724,10 @@ def bg_poll_repos(force=False):
             skip_poll = (repo_override == "pause"
                          or (not force and app.paused and repo_override != "active"))
             if skip_poll and existing:
-                results[repo_key] = {
-                    "path": rp,
-                    "entries": existing.entries,
-                    "remote_url": existing.remote_url,
-                    "github_account": existing.github_account,
-                    "visibility": existing.visibility,
-                    "branch": existing.branch,
-                    "branch_status": existing.branch_status,
-                    "last_commit_msg": existing.last_commit_msg,
-                    "last_commit_date": existing.last_commit_date,
-                    "ahead": existing.ahead,
-                    "behind": existing.behind,
-                }
+                results[repo_key] = _cached_repo_result(rp, existing)
                 continue
             repo_force = force or repo_override == "active"
-            ui_queue.put(("repo_loading", repo_key, rp.name))
-            entries = get_status(rp)
-            last_msg, last_date = get_last_commit(rp)
-            is_new = existing is None
-            if not repo_force and existing and existing.remote_url:
-                remote_url = existing.remote_url
-            else:
-                remote_url = get_remote_url(rp)
-            github_account = get_github_account(remote_url)
-            if not repo_force and existing and existing.visibility:
-                visibility = existing.visibility
-            else:
-                visibility = get_repo_visibility(rp) if remote_url else ""
-            branch = get_current_branch(rp)
-            ahead, behind = get_sync_status(rp, fetch=is_new or repo_force)
-            branch_status = get_branch_classification(rp).get(branch, "")
-            results[repo_key] = {
-                "path": rp,
-                "entries": entries,
-                "remote_url": remote_url,
-                "github_account": github_account,
-                "visibility": visibility,
-                "branch": branch,
-                "branch_status": branch_status,
-                "last_commit_msg": last_msg,
-                "last_commit_date": last_date,
-                "ahead": ahead,
-                "behind": behind,
-            }
+            results[repo_key] = _poll_one_repo(rp, existing, repo_force, force)
         for ngp in non_git_paths:
             ng_key = str(ngp)
             non_git_results[ng_key] = {"path": ngp, "name": ngp.name}
