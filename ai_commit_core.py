@@ -168,6 +168,106 @@ def get_status(cwd):
     return entries
 
 
+def parse_branch_header(line):
+    """Parse the ``## ...`` header line of ``git status --porcelain --branch``.
+
+    Returns a dict ``{branch, ahead, behind, classification, detached}`` where
+    ``classification`` is ``""`` (upstream live), ``"local only"`` (no upstream)
+    or ``"stale"`` (upstream gone). This folds what previously took three
+    separate git calls (``get_current_branch``, ``get_sync_status`` local part,
+    ``get_branch_classification``) into pure parsing of one already-fetched line.
+
+    Porcelain output is guaranteed non-localized and stable, so the marker
+    strings (``[ahead N, behind M]``, ``[gone]``, ``No commits yet on``) are
+    safe to match. Refnames cannot contain ``..`` so ``...`` is an unambiguous
+    branch/upstream separator. See tests/test_status_branch.py for every shape.
+    """
+    info = {"branch": "", "ahead": 0, "behind": 0,
+            "classification": "", "detached": False}
+    if not line.startswith("## "):
+        return info
+    body = line[3:].strip()
+
+    # Detached HEAD: "## HEAD (no branch)"
+    if body.startswith("HEAD (no branch)"):
+        info["branch"] = "HEAD"
+        info["detached"] = True
+        return info
+
+    # Unborn branch (fresh repo, no commits): "## No commits yet on <branch>"
+    m = re.match(r"No commits yet on (.+)$", body)
+    if m:
+        info["branch"] = m.group(1).strip()
+        return info
+
+    # Optional trailing bracket: "[ahead N, behind M]" / "[ahead N]" /
+    # "[behind M]" / "[gone]"
+    bracket = ""
+    mb = re.search(r"\s\[(.+)\]$", body)
+    if mb:
+        bracket = mb.group(1).strip()
+        body = body[:mb.start()]
+
+    if "..." in body:
+        branch, _sep, _upstream = body.partition("...")
+        info["branch"] = branch.strip()
+        if bracket == "gone":
+            info["classification"] = "stale"
+        else:
+            ma = re.search(r"ahead (\d+)", bracket)
+            mbh = re.search(r"behind (\d+)", bracket)
+            if ma:
+                info["ahead"] = int(ma.group(1))
+            if mbh:
+                info["behind"] = int(mbh.group(1))
+    else:
+        # No "..." => branch has no upstream tracking ref.
+        info["branch"] = body.strip()
+        info["classification"] = "local only"
+    return info
+
+
+def read_status_branch(cwd):
+    """Run ``git status --porcelain --branch`` once; return (ok, entries, info).
+
+    ``ok`` is False when git itself failed (non-zero exit) — same contract as
+    :func:`read_status` (a failure is NOT a clean tree). ``entries`` is the same
+    ``(code, filepath)`` list as :func:`get_status`; ``info`` is the parsed
+    branch header (see :func:`parse_branch_header`).
+
+    This is the folded poll path: one spawn yields dirty state, current branch,
+    ahead/behind, and branch classification together. Note: it does NOT fetch —
+    ahead/behind is measured against the local remote-tracking ref, identical to
+    ``get_sync_status(fetch=False)``. Callers wanting fresh counts must call
+    :func:`fetch_remote` first.
+    """
+    rc, stdout, _ = run_git(["status", "--porcelain", "--branch"], cwd=cwd)
+    if rc != 0:
+        return False, [], parse_branch_header("")
+    info = parse_branch_header("")
+    entries = []
+    for line in stdout.splitlines():
+        if line.startswith("## "):
+            info = parse_branch_header(line)
+            continue
+        if len(line) < 4:
+            continue
+        code = line[:2].strip()
+        filepath = _unquote_path(line[3:])
+        entries.append((code, filepath))
+    return True, entries, info
+
+
+def fetch_remote(cwd):
+    """Fetch from origin silently, pruning stale remote-tracking refs.
+
+    Errors (offline, no remote) are ignored. Split out of get_sync_status so the
+    folded poll path can fetch once, then read fresh ahead/behind from the
+    status --branch header.
+    """
+    run_git(["fetch", "--prune", "--quiet"], cwd=cwd)
+
+
 def get_git_global_user():
     """Return (global_name, global_email) from ``git config --global``.
 

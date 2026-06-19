@@ -96,8 +96,9 @@ from ai_commit_core import (
     get_last_commit,
     get_remote_url,
     get_status,
-    get_sync_status,
     read_status,
+    read_status_branch,
+    fetch_remote,
     is_git_repo,
     run_git,
 )
@@ -634,10 +635,31 @@ def _cached_repo_result(rp, existing):
     }
 
 
+def _read_poll_status(rp, remote_url, do_fetch):
+    """Folded git poll: one ``git status --porcelain --branch`` (after an
+    optional fetch) yields dirty entries, current branch, ahead/behind and the
+    current branch's classification.
+
+    Replaces the old get_status + get_current_branch + get_sync_status +
+    get_branch_classification sequence (4 git spawns -> 1, plus the fetch). See
+    docs/polling-performance.md. Returns
+    ``(entries, branch, ahead, behind, branch_status)``.
+    """
+    if do_fetch:
+        fetch_remote(rp)
+    _ok, entries, info = read_status_branch(rp)
+    branch_status = info["classification"]
+    # Preserve old behavior: suppress the per-branch "local only" badge for
+    # repos with no remote at all (the header already shows LOCAL). Repos that
+    # DO have a remote but an untracked branch still show "local only".
+    if branch_status == "local only" and not remote_url:
+        branch_status = ""
+    return entries, info["branch"], info["ahead"], info["behind"], branch_status
+
+
 def _poll_one_repo(rp, existing, repo_force, force):
     """Run a live git poll for a single repo and return its result dict."""
     ui_queue.put(("repo_loading", str(rp), rp.name))
-    entries = get_status(rp)
     last_msg, last_date = get_last_commit(rp)
     is_new = existing is None
     if not repo_force and existing and existing.remote_url:
@@ -649,9 +671,8 @@ def _poll_one_repo(rp, existing, repo_force, force):
         visibility = existing.visibility
     else:
         visibility = get_repo_visibility(rp) if remote_url else ""
-    branch = get_current_branch(rp)
-    ahead, behind = get_sync_status(rp, fetch=is_new or repo_force)
-    branch_status = get_branch_classification(rp).get(branch, "")
+    entries, branch, ahead, behind, branch_status = _read_poll_status(
+        rp, remote_url, do_fetch=is_new or repo_force)
     return {
         "path": rp,
         "entries": entries,
@@ -746,7 +767,6 @@ def bg_refresh_single_repo(repo_name, force=False):
         return
     rp = rs.path
     ui_queue.put(("repo_loading", repo_name, rp.name))
-    entries = get_status(rp)
     last_msg, last_date = get_last_commit(rp)
     if force:
         remote_url = get_remote_url(rp)
@@ -757,9 +777,8 @@ def bg_refresh_single_repo(repo_name, force=False):
         visibility = get_repo_visibility(rp) if remote_url else ""
     else:
         visibility = rs.visibility or (get_repo_visibility(rp) if remote_url else "")
-    branch = get_current_branch(rp)
-    ahead, behind = get_sync_status(rp)
-    branch_status = get_branch_classification(rp).get(branch, "")
+    entries, branch, ahead, behind, branch_status = _read_poll_status(
+        rp, remote_url, do_fetch=True)
     ui_queue.put(("single_repo_refresh", repo_name, {
         "path": rp,
         "entries": entries,
@@ -958,14 +977,12 @@ def bg_refresh_then_generate(repo_name):
     if not rs:
         return
     rp = rs.path
-    entries = get_status(rp)
     last_msg, last_date = get_last_commit(rp)
     remote_url = rs.remote_url or get_remote_url(rp)
     github_account = get_github_account(remote_url)
     visibility = rs.visibility or (get_repo_visibility(rp) if remote_url else "")
-    branch = get_current_branch(rp)
-    ahead, behind = get_sync_status(rp, fetch=False)
-    branch_status = get_branch_classification(rp).get(branch, "")
+    entries, branch, ahead, behind, branch_status = _read_poll_status(
+        rp, remote_url, do_fetch=False)
     ui_queue.put(("refresh_then_generate", repo_name, {
         "path": rp,
         "entries": entries,

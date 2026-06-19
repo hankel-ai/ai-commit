@@ -56,24 +56,25 @@ def test_paused_polls_only_active_repo():
     m.ui_queue = SimpleNamespace(put=lambda item: posted.append(item))
 
     # Spies — discovery must not run; only the active repo gets a live status.
+    # The poll path is folded onto read_status_branch (see
+    # docs/polling-performance.md); spy that instead of the old get_status.
     def spy_is_git_repo(p):
         calls["is_git_repo"] += 1
         return True
 
-    def spy_status(p):
+    def spy_read_status_branch(p):
         calls["status_paths"].append(str(p))
-        return []
+        return True, [], {"branch": "main", "ahead": 0, "behind": 0,
+                          "classification": "", "detached": False}
 
     m.is_git_repo = spy_is_git_repo
-    m.get_status = spy_status
+    m.read_status_branch = spy_read_status_branch
+    m.fetch_remote = lambda p: None
     m.get_active_github_account = lambda: "tester"
     m.get_last_commit = lambda p: ("", "")
     m.get_remote_url = lambda p: ""
     m.get_github_account = lambda url: ""
     m.get_repo_visibility = lambda p: ""
-    m.get_current_branch = lambda p: "main"
-    m.get_sync_status = lambda p, fetch=True: (0, 0)
-    m.get_branch_classification = lambda p: {}
 
     m.bg_poll_repos(force=False)
 
