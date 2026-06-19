@@ -3046,6 +3046,7 @@ def process_queue():
                     dpg.set_value(rs.input_tag, "")
                 dpg.set_value(rs.status_tag, "Committed!")
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
+                app.collapse_on_next_build.add(repo_name)
                 executor.submit(bg_refresh_single_repo, repo_name)
             elif committed and not pushed and detail.startswith("NO_UPSTREAM:"):
                 branch = detail.split(":", 1)[1]
