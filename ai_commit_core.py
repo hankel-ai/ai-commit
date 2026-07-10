@@ -755,6 +755,20 @@ def generate_message(diff, config):
 # Commit & push
 # ---------------------------------------------------------------------------
 
+# GitLab's documented push option to bypass secret push protection for one push.
+SECRET_PUSH_SKIP_OPTION = "secret_push_protection.skip_all"
+
+
+def is_secret_push_block(text):
+    """True if a push failure is GitLab's secret-push-protection pre-receive
+    block (the one that suggests `-o secret_push_protection.skip_all`)."""
+    if not text:
+        return False
+    lowered = text.lower()
+    return (SECRET_PUSH_SKIP_OPTION in lowered
+            or "push blocked: secrets detected" in lowered)
+
+
 def do_commit_and_push(cwd, message):
     """Stage all changes, commit, and attempt to push.
 

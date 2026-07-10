@@ -83,6 +83,8 @@ from ai_commit_core import (
     find_autostash_ref,
     do_commit_and_push,
     do_pull,
+    is_secret_push_block,
+    SECRET_PUSH_SKIP_OPTION,
     generate_message,
     get_active_github_account,
     get_branch_classification,
@@ -965,7 +967,37 @@ def bg_push_set_upstream(repo_name, branch):
     if rc == 0:
         ui_queue.put(("push_upstream_result", repo_name, True, out.strip()))
     else:
-        ui_queue.put(("push_upstream_result", repo_name, False, err.strip()))
+        # Carry the branch so a secret-push-protection block can offer an
+        # override retry that still sets the upstream.
+        ui_queue.put(("push_upstream_result", repo_name, False, err.strip(),
+                      branch))
+
+
+def bg_push_override(repo_name, branch=""):
+    """Re-push, skipping GitLab secret push protection for this one push.
+
+    Only invoked after the user confirms the override prompt for a push that
+    was blocked by the secret-detection pre-receive hook. When *branch* is
+    set, the blocked push was a --set-upstream push, so retry with it too.
+    Posts push_upstream_result — the success path there (status, collapse,
+    refresh, Actions viewer) is exactly what a completed push needs.
+    """
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    args = ["push", "-o", SECRET_PUSH_SKIP_OPTION]
+    if branch:
+        args += ["--set-upstream", "origin", branch]
+    activity_log.log_event(
+        f"Push with -o {SECRET_PUSH_SKIP_OPTION} (user override)",
+        repo=repo_name, category=activity_log.CAT_GIT,
+    )
+    rc, out, err = run_git(args, cwd=str(rs.path))
+    if rc == 0:
+        ui_queue.put(("push_upstream_result", repo_name, True, out.strip()))
+    else:
+        ui_queue.put(("push_upstream_result", repo_name, False, err.strip(),
+                      branch))
 
 
 def bg_refresh_then_generate(repo_name):
@@ -1564,6 +1596,66 @@ def _cb_confirm_upstream(sender, app_data, user_data):
     dpg.set_value(rs.status_tag, f"Pushing to origin/{branch}...")
     dpg.configure_item(rs.status_tag, color=COL_YELLOW)
     executor.submit(bg_push_set_upstream, repo_name, branch)
+
+
+def _show_secret_push_prompt(repo_name, branch=""):
+    """Push blocked by GitLab secret push protection — offer a one-time skip."""
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    win_tag = dpg.generate_uuid()
+    pop_w, pop_h = 520, 170
+    click_pos = dpg.get_mouse_pos()
+    px = max(0, int(click_pos[0]) - pop_w // 2)
+    py = max(0, int(click_pos[1]))
+
+    cmd = f"git push -o {SECRET_PUSH_SKIP_OPTION}"
+    if branch:
+        cmd += f" --set-upstream origin {branch}"
+
+    with dpg.window(
+        label=f"Secret Push Protection — {rs.name}",
+        tag=win_tag,
+        width=pop_w, height=pop_h,
+        pos=(px, py),
+        no_collapse=True,
+        on_close=lambda s, a, u: (
+            dpg.delete_item(s) if dpg.does_item_exist(s) else None
+        ),
+    ):
+        dpg.add_text("GitLab blocked this push: secrets detected in the commit.",
+                     color=COL_RED)
+        dpg.add_text("Remove the secrets and amend, or skip protection for "
+                     "this one push.")
+        dpg.add_text(f"Run: {cmd}", color=COL_DIM)
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True):
+            push_btn = dpg.add_button(
+                label="Push Anyway (skip protection)",
+                callback=_cb_confirm_secret_push,
+                user_data=(repo_name, branch, win_tag),
+            )
+            dpg.bind_item_theme(push_btn, pull_btn_theme)
+            dpg.add_button(
+                label="Cancel",
+                user_data=win_tag,
+                callback=lambda s, a, u: (
+                    dpg.delete_item(u) if dpg.does_item_exist(u) else None
+                ),
+            )
+
+
+def _cb_confirm_secret_push(sender, app_data, user_data):
+    """User confirmed pushing past secret push protection."""
+    repo_name, branch, win_tag = user_data
+    if dpg.does_item_exist(win_tag):
+        dpg.delete_item(win_tag)
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    dpg.set_value(rs.status_tag, "Pushing (skipping secret protection)...")
+    dpg.configure_item(rs.status_tag, color=COL_YELLOW)
+    executor.submit(bg_push_override, repo_name, branch)
 
 
 def cb_open_terminal(sender, app_data, user_data):
@@ -3064,13 +3156,18 @@ def process_queue():
                     dpg.set_value(rs.input_tag, "")
                 rs.error_message = detail
                 update_repo_status(rs)
+                # GitLab secret push protection block — the commit landed, so
+                # offer a one-time `-o secret_push_protection.skip_all` retry.
+                if is_secret_push_block(detail):
+                    _show_secret_push_prompt(repo_name)
             else:
                 rs.gen_status = GenStatus.ERROR
                 rs.error_message = detail
                 update_repo_status(rs)
 
         elif kind == "push_upstream_result":
-            _, repo_name, success, detail = msg
+            _, repo_name, success, detail = msg[:4]
+            upstream_branch = msg[4] if len(msg) > 4 else ""
             rs = app.repos.get(repo_name)
             if not rs:
                 continue
@@ -3087,6 +3184,10 @@ def process_queue():
                 rs.gen_status = GenStatus.ERROR
                 rs.error_message = f"Push failed: {detail}"
                 update_repo_status(rs)
+                # Blocked by secret push protection — retry must keep the
+                # --set-upstream since the branch still has no tracking ref.
+                if is_secret_push_block(detail):
+                    _show_secret_push_prompt(repo_name, upstream_branch)
 
         elif kind == "workflow_check":
             _, repo_name, reason = msg
