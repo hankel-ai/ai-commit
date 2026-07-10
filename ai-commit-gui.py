@@ -90,7 +90,6 @@ from ai_commit_core import (
     get_branch_classification,
     get_current_branch,
     get_diff,
-    get_git_global_user,
     get_github_account,
     get_head_sha,
     get_incoming_changes,
@@ -3184,8 +3183,6 @@ def process_queue():
 
         if kind == "active_gh_account":
             app.active_gh_account = msg[1]
-            if dpg.does_item_exist("gh_account_label"):
-                dpg.set_value("gh_account_label", msg[1] if msg[1] else "")
 
         elif kind == "poll_result":
             results = msg[1]
@@ -3950,9 +3947,6 @@ def main():
         # Watched folders
         dpg.add_group(tag="folders_container")
 
-        # Global git identity for the toolbar label (one read at startup).
-        _gname, _gemail = get_git_global_user()
-
         with dpg.group(horizontal=True):
             dpg.add_button(label="Add Folder", callback=cb_browse)
             dpg.add_button(label="Refresh", callback=cb_refresh)
@@ -3960,14 +3954,9 @@ def main():
             dpg.add_button(label="Settings", callback=cb_open_settings)
             dpg.add_button(label="Activity Log", callback=cb_open_activity_log)
             dpg.add_spacer(width=10)
-            dpg.add_checkbox(label="Recent only", tag="recent_only_cb",
+            dpg.add_checkbox(label="Recent", tag="recent_only_cb",
                              default_value=app.recent_only, callback=cb_recent_only)
             dpg.add_text("", tag="hidden_count_label", color=COL_DIM)
-            dpg.add_spacer(width=10)
-            dpg.add_text("", tag="gh_account_label", color=COL_GREEN)
-            dpg.add_spacer(width=10)
-            _global_label = f"{_gname} <{_gemail}>" if _gname and _gemail else _gname or _gemail or "not set"
-            dpg.add_text(_global_label, color=COL_DIM)
 
         dpg.add_separator()
 
