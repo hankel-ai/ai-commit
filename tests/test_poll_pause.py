@@ -36,7 +36,8 @@ def _fake_repo(path):
     return SimpleNamespace(
         path=Path(path), name=Path(path).name, entries=[], remote_url="",
         github_account="", visibility="", branch="main", branch_status="",
-        last_commit_msg="", last_commit_date="", ahead=0, behind=0,
+        last_commit_msg="", last_commit_date="", last_commit_ts=0.0,
+        ahead=0, behind=0,
     )
 
 
@@ -71,7 +72,7 @@ def test_paused_polls_only_active_repo():
     m.read_status_branch = spy_read_status_branch
     m.fetch_remote = lambda p: None
     m.get_active_github_account = lambda: "tester"
-    m.get_last_commit = lambda p: ("", "")
+    m.get_last_commit = lambda p: ("", "", 0.0)
     m.get_remote_url = lambda p: ""
     m.get_github_account = lambda url: ""
     m.get_repo_visibility = lambda p: ""

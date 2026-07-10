@@ -427,26 +427,50 @@ def compute_header_open(*, override, paused, has_activity, force_expand,
 
 
 def get_last_commit(cwd):
-    """Return (full_message, short_date) for HEAD, or ("", "").
+    """Return (full_message, short_date, commit_ts) for HEAD, or ("", "", 0.0).
 
     One ``git log`` call: ``%ci`` (a fixed single-line date) on the first line,
     then ``%B`` (the free-form, possibly multi-line message). Split on only the
     first newline so the body's own newlines never collide with the date.
+
+    ``commit_ts`` is the committer date as an epoch float (``0.0`` if unparseable)
+    — used by ``is_repo_active`` for the recency tier. The tz offset in ``%ci`` is
+    dropped before parsing; the resulting naive local time is close enough for a
+    day-granularity "within N days" window.
     """
     rc, out, _ = run_git(["log", "-1", "--format=%ci%n%B"], cwd=cwd)
     if rc != 0:
-        return "", ""
+        return "", "", 0.0
     date_str, _, msg_out = out.partition("\n")
     date_str = date_str.strip()
     short_date = ""
+    commit_ts = 0.0
     if date_str:
         try:
             from datetime import datetime
             dt = datetime.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
             short_date = dt.strftime("%b %d %I:%M%p").replace("AM", "am").replace("PM", "pm")
-        except (ValueError, IndexError):
+            commit_ts = dt.timestamp()
+        except (ValueError, IndexError, OverflowError, OSError):
             short_date = date_str[:16]
-    return msg_out.strip(), short_date
+    return msg_out.strip(), short_date, commit_ts
+
+
+def is_repo_active(commit_ts, dirty, ahead, behind, now, recent_days):
+    """Whether a repo counts as *active* (shown in the list + polled every cycle).
+
+    Active when the working tree is dirty, there are unpushed/unpulled commits
+    (ahead/behind), or the last commit is within *recent_days*. Otherwise the repo
+    is idle: hidden by the recency filter and polled on the slow idle cadence.
+
+    Pure/testable tier decision — see docs/polling-performance.md and
+    tests/test_recency.py.
+    """
+    if dirty or ahead or behind:
+        return True
+    if commit_ts and (now - commit_ts) <= recent_days * 86400:
+        return True
+    return False
 
 
 def get_sync_status(cwd, fetch=True):

@@ -96,6 +96,7 @@ from ai_commit_core import (
     get_incoming_changes,
     get_repo_visibility,
     get_last_commit,
+    is_repo_active,
     get_remote_url,
     get_status,
     read_status,
@@ -265,6 +266,7 @@ class RepoState:
     branch_status: str = ""  # "", "local only", or "stale"
     last_commit_msg: str = ""
     last_commit_date: str = ""
+    last_commit_ts: float = 0.0
     ahead: int = 0
     behind: int = 0
     gen_entries: list = field(default_factory=list)
@@ -301,6 +303,12 @@ class AppState:
     actions_popup_enabled: bool = True
     chime_on_completion: bool = False
     show_non_git_folders: bool = True
+    recent_only: bool = True  # hide idle repos (old + clean) from the list
+    recent_days: int = 14  # a commit within this many days counts as "recent"
+    idle_poll_interval: int = 900  # seconds between polls of idle-tier repos
+    idle_last_poll: dict = field(default_factory=dict)  # repo_key -> last idle-poll epoch (transient)
+    last_results: dict = field(default_factory=dict)  # last poll_result payload (for no-poll re-render)
+    last_non_git: dict = field(default_factory=dict)  # last non-git payload (for no-poll re-render)
     active_gh_account: str = ""
     non_git_folders: dict = field(default_factory=dict)
     repo_overrides: dict = field(default_factory=dict)  # repo_key -> "pause" or "active"
@@ -366,6 +374,9 @@ def _save_settings():
             "actions_popup_enabled": app.actions_popup_enabled,
             "chime_on_completion": app.chime_on_completion,
             "show_non_git_folders": app.show_non_git_folders,
+            "recent_only": app.recent_only,
+            "recent_days": app.recent_days,
+            "idle_poll_interval": app.idle_poll_interval,
             "repo_overrides": app.repo_overrides,
         }
         _SETTINGS_FILE.write_text(json.dumps(data))
@@ -632,6 +643,7 @@ def _cached_repo_result(rp, existing):
         "branch_status": existing.branch_status,
         "last_commit_msg": existing.last_commit_msg,
         "last_commit_date": existing.last_commit_date,
+        "last_commit_ts": existing.last_commit_ts,
         "ahead": existing.ahead,
         "behind": existing.behind,
     }
@@ -662,7 +674,7 @@ def _read_poll_status(rp, remote_url, do_fetch):
 def _poll_one_repo(rp, existing, repo_force, force):
     """Run a live git poll for a single repo and return its result dict."""
     ui_queue.put(("repo_loading", str(rp), rp.name))
-    last_msg, last_date = get_last_commit(rp)
+    last_msg, last_date, last_ts = get_last_commit(rp)
     is_new = existing is None
     if not repo_force and existing and existing.remote_url:
         remote_url = existing.remote_url
@@ -685,6 +697,7 @@ def _poll_one_repo(rp, existing, repo_force, force):
         "branch_status": branch_status,
         "last_commit_msg": last_msg,
         "last_commit_date": last_date,
+        "last_commit_ts": last_ts,
         "ahead": ahead,
         "behind": behind,
     }
@@ -700,6 +713,7 @@ def bg_poll_repos(force=False):
     active_account = get_active_github_account()
     ui_queue.put(("active_gh_account", active_account))
 
+    now = time.time()
     results = {}
     non_git_results = {}
 
@@ -750,8 +764,24 @@ def bg_poll_repos(force=False):
             if skip_poll and existing:
                 results[repo_key] = _cached_repo_result(rp, existing)
                 continue
+            # Idle tier: a known repo that isn't recent/active (clean, synced, last
+            # commit older than recent_days) is polled only on the slow idle
+            # cadence — the CPU win for the many rarely-touched repos. New repos,
+            # manual Refresh (force), and force-active overrides always poll live.
+            # idle_last_poll holds each repo's last *live* poll time (stamped below
+            # on every real poll), so a repo just polled as new/active isn't
+            # immediately re-polled the cycle it's reclassified idle.
+            if (existing and not force and repo_override != "active"
+                    and not is_repo_active(existing.last_commit_ts,
+                                           bool(existing.entries),
+                                           existing.ahead, existing.behind,
+                                           now, app.recent_days)
+                    and now - app.idle_last_poll.get(repo_key, 0) < app.idle_poll_interval):
+                results[repo_key] = _cached_repo_result(rp, existing)
+                continue
             repo_force = force or repo_override == "active"
             results[repo_key] = _poll_one_repo(rp, existing, repo_force, force)
+            app.idle_last_poll[repo_key] = now
         for ngp in non_git_paths:
             ng_key = str(ngp)
             non_git_results[ng_key] = {"path": ngp, "name": ngp.name}
@@ -769,7 +799,7 @@ def bg_refresh_single_repo(repo_name, force=False):
         return
     rp = rs.path
     ui_queue.put(("repo_loading", repo_name, rp.name))
-    last_msg, last_date = get_last_commit(rp)
+    last_msg, last_date, last_ts = get_last_commit(rp)
     if force:
         remote_url = get_remote_url(rp)
     else:
@@ -791,6 +821,7 @@ def bg_refresh_single_repo(repo_name, force=False):
         "branch_status": branch_status,
         "last_commit_msg": last_msg,
         "last_commit_date": last_date,
+        "last_commit_ts": last_ts,
         "ahead": ahead,
         "behind": behind,
     }, force))
@@ -1009,7 +1040,7 @@ def bg_refresh_then_generate(repo_name):
     if not rs:
         return
     rp = rs.path
-    last_msg, last_date = get_last_commit(rp)
+    last_msg, last_date, last_ts = get_last_commit(rp)
     remote_url = rs.remote_url or get_remote_url(rp)
     github_account = get_github_account(remote_url)
     visibility = rs.visibility or (get_repo_visibility(rp) if remote_url else "")
@@ -1025,6 +1056,7 @@ def bg_refresh_then_generate(repo_name):
         "branch_status": branch_status,
         "last_commit_msg": last_msg,
         "last_commit_date": last_date,
+        "last_commit_ts": last_ts,
         "ahead": ahead,
         "behind": behind,
     }))
@@ -1322,6 +1354,45 @@ def cb_show_non_git(sender, app_data):
     trigger_poll()
 
 
+def cb_recent_only(sender, app_data):
+    """Toggle the recency display filter. Re-renders from the last poll payload —
+    applying/removing the filter costs no git work."""
+    app.recent_only = bool(dpg.get_value(sender))
+    # Keep the toolbar + Settings checkboxes in sync (whichever was toggled).
+    for tag in ("recent_only_cb", "settings_recent_only_cb"):
+        if tag != sender and dpg.does_item_exist(tag):
+            dpg.set_value(tag, app.recent_only)
+    _save_settings()
+    if app.last_results or app.last_non_git:
+        rebuild_repos_ui(app.last_results, app.last_non_git, preserve_open=True)
+    else:
+        trigger_poll()
+
+
+def cb_recent_days(sender, app_data):
+    try:
+        val = int(dpg.get_value(sender))
+        if val < 1:
+            val = 1
+        app.recent_days = val
+        _save_settings()
+        trigger_poll()  # window changed -> re-tier and re-filter
+    except (ValueError, TypeError):
+        pass
+
+
+def cb_idle_interval(sender, app_data):
+    try:
+        val = int(dpg.get_value(sender))
+        if val < 60:
+            val = 60
+        app.idle_poll_interval = val
+        _save_settings()
+        trigger_poll()
+    except (ValueError, TypeError):
+        pass
+
+
 def cb_open_settings(sender, app_data):
     """Open the settings popup window."""
     win_tag = "settings_window"
@@ -1381,6 +1452,23 @@ def cb_open_settings(sender, app_data):
         dpg.add_checkbox(label="Show non-git folders",
                          default_value=app.show_non_git_folders,
                          callback=cb_show_non_git)
+        dpg.add_checkbox(label="Recent repos only", tag="settings_recent_only_cb",
+                         default_value=app.recent_only,
+                         callback=cb_recent_only)
+        with dpg.group(horizontal=True):
+            dpg.add_text("Recent window:", color=COL_DIM)
+            dpg.add_input_int(default_value=app.recent_days, width=80,
+                              min_value=1, min_clamped=True,
+                              max_value=3650, max_clamped=True,
+                              callback=cb_recent_days, step=0)
+            dpg.add_text("days", color=COL_DIM)
+        with dpg.group(horizontal=True):
+            dpg.add_text("Idle repo poll:", color=COL_DIM)
+            dpg.add_input_int(default_value=app.idle_poll_interval, width=80,
+                              min_value=60, min_clamped=True,
+                              max_value=86400, max_clamped=True,
+                              callback=cb_idle_interval, step=0)
+            dpg.add_text("s", color=COL_DIM)
         dpg.add_spacer(height=10)
         def _save_and_close():
             if dpg.does_item_exist("settings_ollama_url"):
@@ -3005,6 +3093,7 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
             branch_status=info.get("branch_status", ""),
             last_commit_msg=info.get("last_commit_msg", ""),
             last_commit_date=info.get("last_commit_date", ""),
+            last_commit_ts=info.get("last_commit_ts", 0.0),
             ahead=info.get("ahead", 0),
             behind=info.get("behind", 0),
         )
@@ -3037,10 +3126,26 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
     # Compute max base-label width so dates right-align
     label_width = max((len(_repo_base_label(rs)) for rs in new_repos.values()), default=0)
 
-    # Render git repos first (sorted), then non-git folders at the bottom
+    # Render git repos first (sorted), then non-git folders at the bottom.
+    # When "Recent only" is on, hide idle repos (clean, synced, last commit older
+    # than recent_days) — but always keep force-active repos and repos with a
+    # sticky error visible. Hidden repos stay in app.repos (state/polling continue).
+    now = time.time()
+    hidden_count = 0
     for rs in sorted(new_repos.values(), key=lambda r: r.name.lower()):
+        if app.recent_only:
+            repo_force_active = app.repo_overrides.get(str(rs.path), "") == "active"
+            sticky_error = rs.gen_status == GenStatus.ERROR
+            if (not repo_force_active and not sticky_error
+                    and not is_repo_active(rs.last_commit_ts, bool(rs.entries),
+                                           rs.ahead, rs.behind, now, app.recent_days)):
+                hidden_count += 1
+                continue
         build_repo_section(rs, "repos_container", label_width=label_width,
                            preserve_open=preserve_open, prior_open=prior_open)
+    if dpg.does_item_exist("hidden_count_label"):
+        dpg.set_value("hidden_count_label",
+                      f"{hidden_count} hidden" if (app.recent_only and hidden_count) else "")
 
     if app.show_non_git_folders:
         for ngf in sorted(new_non_git.values(), key=lambda n: str(n.path).lower()):
@@ -3086,6 +3191,10 @@ def process_queue():
             results = msg[1]
             non_git = msg[2] if len(msg) > 2 else {}
             clear_errors = msg[3] if len(msg) > 3 else False
+            # Cache the raw payload so the "Recent only" toggle can re-render the
+            # list (applying/removing the filter) without spawning a poll.
+            app.last_results = results
+            app.last_non_git = non_git
             rebuild_repos_ui(results, non_git, clear_errors=clear_errors)
 
         elif kind == "gen_result":
@@ -3244,6 +3353,7 @@ def process_queue():
                     "branch_status": rs.branch_status,
                     "last_commit_msg": rs.last_commit_msg,
                     "last_commit_date": rs.last_commit_date,
+                    "last_commit_ts": rs.last_commit_ts,
                     "ahead": rs.ahead,
                     "behind": rs.behind,
                 }
@@ -3265,6 +3375,7 @@ def process_queue():
                     "branch_status": rs.branch_status,
                     "last_commit_msg": rs.last_commit_msg,
                     "last_commit_date": rs.last_commit_date,
+                    "last_commit_ts": rs.last_commit_ts,
                     "ahead": rs.ahead,
                     "behind": rs.behind,
                 }
@@ -3740,6 +3851,9 @@ def main():
         app.actions_popup_enabled = saved.get("actions_popup_enabled", True)
         app.chime_on_completion = saved.get("chime_on_completion", False)
         app.show_non_git_folders = saved.get("show_non_git_folders", True)
+        app.recent_only = saved.get("recent_only", True)
+        app.recent_days = saved.get("recent_days", 14)
+        app.idle_poll_interval = saved.get("idle_poll_interval", 900)
         app.repo_overrides = saved.get("repo_overrides", {})
         if not folders_from_cli:
             # Support new list format and migrate old single-folder format
@@ -3845,6 +3959,10 @@ def main():
             dpg.add_button(label="Pause", tag="pause_btn", callback=cb_pause)
             dpg.add_button(label="Settings", callback=cb_open_settings)
             dpg.add_button(label="Activity Log", callback=cb_open_activity_log)
+            dpg.add_spacer(width=10)
+            dpg.add_checkbox(label="Recent only", tag="recent_only_cb",
+                             default_value=app.recent_only, callback=cb_recent_only)
+            dpg.add_text("", tag="hidden_count_label", color=COL_DIM)
             dpg.add_spacer(width=10)
             dpg.add_text("", tag="gh_account_label", color=COL_GREEN)
             dpg.add_spacer(width=10)

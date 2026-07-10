@@ -38,13 +38,14 @@ def _fake_repo(path, gen_status, error_message=""):
     return SimpleNamespace(
         path=Path(path), name=Path(path).name, entries=[], remote_url="",
         github_account="", visibility="", branch="main", branch_status="",
-        last_commit_msg="", last_commit_date="", ahead=1, behind=0,
+        last_commit_msg="", last_commit_date="", last_commit_ts=0.0,
+        ahead=1, behind=0,
         gen_status=gen_status, error_message=error_message, commit_message="",
     )
 
 
 def _stub_git_ops():
-    m.get_last_commit = lambda p: ("", "")
+    m.get_last_commit = lambda p: ("", "", 0.0)
     m.get_remote_url = lambda p: ""
     m.get_github_account = lambda url: ""
     m.get_repo_visibility = lambda p: ""
@@ -114,10 +115,42 @@ def test_unforced_single_refresh_keeps_sticky_error():
     check("rebuild_still_ran", len(rebuilds) == 1)
 
 
+def test_single_refresh_preserves_other_repos_commit_ts():
+    """Regression: the merged rebuild after a single-repo refresh/generate must
+    carry last_commit_ts for the OTHER repos. If it drops to 0.0 the recency
+    filter classifies them idle and hides every repo except the one refreshed
+    (the "generate makes all repos disappear" bug)."""
+    import queue as _queue
+    r1, r2 = "C:/repos/r1", "C:/repos/r2"
+    rs1 = _fake_repo(r1, m.GenStatus.IDLE)
+    rs2 = _fake_repo(r2, m.GenStatus.IDLE)
+    rs2.last_commit_ts = 1_234_567.0
+    m.app = SimpleNamespace(repos={r1: rs1, r2: rs2}, non_git_folders={})
+
+    captured = []
+    m.rebuild_repos_ui = lambda *a, **kw: captured.append(a)
+    m._non_git_for_rebuild = lambda: {}
+
+    info = {"path": Path(r1), "entries": [], "remote_url": "",
+            "github_account": "", "visibility": "", "branch": "main",
+            "branch_status": "", "last_commit_msg": "", "last_commit_date": "",
+            "last_commit_ts": 999.0, "ahead": 1, "behind": 0}
+    q = _queue.Queue()
+    q.put(("single_repo_refresh", r1, info, False))
+    m.ui_queue = q
+    m.process_queue()
+
+    check("rebuild_called", len(captured) == 1)
+    if captured:
+        merged = captured[0][0]
+        check("other_repo_ts_preserved", merged[r2].get("last_commit_ts") == 1_234_567.0)
+
+
 def main():
     test_bg_refresh_single_repo_posts_force_flag()
     test_forced_single_refresh_clears_sticky_error()
     test_unforced_single_refresh_keeps_sticky_error()
+    test_single_refresh_preserves_other_repos_commit_ts()
     if _failures:
         print(f"\n{len(_failures)} test(s) failed.")
         sys.exit(1)
