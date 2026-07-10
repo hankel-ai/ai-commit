@@ -791,7 +791,7 @@ def bg_refresh_single_repo(repo_name, force=False):
         "last_commit_date": last_date,
         "ahead": ahead,
         "behind": behind,
-    }))
+    }, force))
 
 
 def bg_generate_message(repo_name):
@@ -3120,7 +3120,16 @@ def process_queue():
                 )
 
         elif kind == "single_repo_refresh":
-            _, repo_name, info = msg
+            _, repo_name, info = msg[:3]
+            force = msg[3] if len(msg) > 3 else False
+            # A manual per-repo Refresh (force=True) acknowledges this repo's
+            # sticky error, same as Refresh-all does via clear_errors. Clear it
+            # before the rebuild snapshots gen_status/error_message, or the
+            # sticky-error branch in rebuild_repos_ui keeps it alive.
+            rs = app.repos.get(repo_name)
+            if force and rs and rs.gen_status == GenStatus.ERROR:
+                rs.gen_status = GenStatus.IDLE
+                rs.error_message = ""
             # Merge fresh data for this repo into current state and rebuild
             merged = {}
             for name, rs in app.repos.items():
