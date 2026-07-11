@@ -96,6 +96,7 @@ from ai_commit_core import (
     get_repo_visibility,
     get_last_commit,
     is_repo_active,
+    is_folder_recent,
     get_remote_url,
     get_status,
     read_status,
@@ -283,6 +284,7 @@ class RepoState:
 class NonGitFolder:
     path: Path
     name: str
+    mtime: float = 0.0  # folder modification time (recency filter); 0.0 = unknown
     header_tag: int = 0
     status_tag: int = 0
 
@@ -783,7 +785,12 @@ def bg_poll_repos(force=False):
             app.idle_last_poll[repo_key] = now
         for ngp in non_git_paths:
             ng_key = str(ngp)
-            non_git_results[ng_key] = {"path": ngp, "name": ngp.name}
+            try:
+                ng_mtime = ngp.stat().st_mtime
+            except OSError:
+                ng_mtime = 0.0
+            non_git_results[ng_key] = {"path": ngp, "name": ngp.name,
+                                       "mtime": ng_mtime}
     ui_queue.put(("poll_result", results, non_git_results, force))
 
 
@@ -2998,7 +3005,8 @@ def _height_for_text(text):
 
 def _non_git_for_rebuild():
     """Return the current non-git folders as a dict suitable for rebuild_repos_ui."""
-    return {k: {"path": ngf.path, "name": ngf.name} for k, ngf in app.non_git_folders.items()}
+    return {k: {"path": ngf.path, "name": ngf.name, "mtime": ngf.mtime}
+            for k, ngf in app.non_git_folders.items()}
 
 
 def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
@@ -3102,7 +3110,8 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
     new_non_git = {}
     if non_git_results:
         for key, info in non_git_results.items():
-            new_non_git[key] = NonGitFolder(path=info["path"], name=info["name"])
+            new_non_git[key] = NonGitFolder(path=info["path"], name=info["name"],
+                                            mtime=info.get("mtime", 0.0))
 
     # Disambiguate duplicate display names across both git repos and non-git
     # folders by prefixing with the parent folder name (e.g. "ClaudeCode/foo").
@@ -3142,14 +3151,21 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
                 continue
         build_repo_section(rs, "repos_container", label_width=label_width,
                            preserve_open=preserve_open, prior_open=prior_open)
+
+    # Non-git folders get the same recency filter, using the folder's
+    # modification time in place of git signals (no commits/dirty state to go
+    # on). Hidden folders stay in app.non_git_folders so toggling re-shows them.
+    if app.show_non_git_folders:
+        for ngf in sorted(new_non_git.values(), key=lambda n: str(n.path).lower()):
+            if app.recent_only and not is_folder_recent(ngf.mtime, now,
+                                                        app.recent_days):
+                hidden_count += 1
+                continue
+            build_non_git_section(ngf, "repos_container",
+                                  preserve_open=preserve_open, prior_open=prior_open)
     if dpg.does_item_exist("hidden_count_label"):
         dpg.set_value("hidden_count_label",
                       f"{hidden_count} hidden" if (app.recent_only and hidden_count) else "")
-
-    if app.show_non_git_folders:
-        for ngf in sorted(new_non_git.values(), key=lambda n: str(n.path).lower()):
-            build_non_git_section(ngf, "repos_container",
-                                  preserve_open=preserve_open, prior_open=prior_open)
 
     app.repos = new_repos
     app.non_git_folders = new_non_git

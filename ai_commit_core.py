@@ -473,6 +473,19 @@ def is_repo_active(commit_ts, dirty, ahead, behind, now, recent_days):
     return False
 
 
+def is_folder_recent(mtime, now, recent_days):
+    """Whether a non-git folder counts as *recent* (shown by the recency filter).
+
+    Folder counterpart of ``is_repo_active`` for directories with no git signals:
+    recent when the folder's modification time is within *recent_days*. An
+    unknown mtime (``0.0``, e.g. ``stat`` failed) counts as recent so a folder
+    is never silently hidden. Pure/testable — see tests/test_recency.py.
+    """
+    if not mtime:
+        return True
+    return (now - mtime) <= recent_days * 86400
+
+
 def get_sync_status(cwd, fetch=True):
     """Return (ahead, behind) commit counts vs tracking branch.
 

@@ -1,9 +1,13 @@
-"""Tests for the recency tier predicate: ai_commit_core.is_repo_active.
+"""Tests for the recency tier predicates: ai_commit_core.is_repo_active and
+ai_commit_core.is_folder_recent.
 
 is_repo_active decides whether a repo is "active" (shown in the list and polled
 every cycle) or "idle" (hidden by the recency filter and polled on the slow idle
 cadence). A repo is active when the working tree is dirty, there are unpushed/
 unpulled commits (ahead/behind), or the last commit is within recent_days.
+
+is_folder_recent is the non-git-folder counterpart: recent when the folder's
+mtime is within recent_days; an unknown mtime (0.0) counts as recent.
 
 Run: python tests/test_recency.py
 """
@@ -83,6 +87,34 @@ def test_custom_window_widens():
     check("wide_window_active_90", core.is_repo_active(ts, False, 0, 0, NOW, 90) is True)
 
 
+# --- non-git folder recency (is_folder_recent) -------------------------------
+
+def test_folder_recent_mtime_shows():
+    mt = NOW - 5 * DAY
+    check("folder_recent", core.is_folder_recent(mt, NOW, 14) is True)
+
+
+def test_folder_boundary_exactly_on_window_is_recent():
+    mt = NOW - 14 * DAY  # exactly at the edge -> inclusive, same as repos
+    check("folder_boundary_recent", core.is_folder_recent(mt, NOW, 14) is True)
+
+
+def test_folder_just_beyond_window_is_old():
+    mt = NOW - 14 * DAY - 1
+    check("folder_beyond_old", core.is_folder_recent(mt, NOW, 14) is False)
+
+
+def test_folder_zero_mtime_is_recent():
+    # stat() failed / unknown mtime -> never silently hide the folder.
+    check("folder_zero_mtime_recent", core.is_folder_recent(0.0, NOW, 14) is True)
+
+
+def test_folder_custom_window_widens():
+    mt = NOW - 45 * DAY
+    check("folder_window_old_14", core.is_folder_recent(mt, NOW, 14) is False)
+    check("folder_window_recent_90", core.is_folder_recent(mt, NOW, 90) is True)
+
+
 def main():
     test_dirty_forces_active()
     test_ahead_forces_active()
@@ -94,6 +126,11 @@ def main():
     test_zero_ts_clean_is_idle()
     test_zero_ts_but_dirty_is_active()
     test_custom_window_widens()
+    test_folder_recent_mtime_shows()
+    test_folder_boundary_exactly_on_window_is_recent()
+    test_folder_just_beyond_window_is_old()
+    test_folder_zero_mtime_is_recent()
+    test_folder_custom_window_widens()
     if _failures:
         print(f"\n{len(_failures)} test(s) failed.")
         sys.exit(1)
