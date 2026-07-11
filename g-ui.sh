@@ -11,4 +11,4 @@ case " $* " in
     ;;
 esac
 
-exec "$DIR/.venv/bin/python3" "$DIR/ai-commit-gui.py" "$@" --url http://192.168.1.65:11434
+exec "$DIR/.venv/bin/python3" "$DIR/ai-commit-gui.py" "$@" --url "${AI_COMMIT_OLLAMA_URL:-http://localhost:11434}"
