@@ -2279,7 +2279,8 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
     change_count = len(rs.entries)
     label = _repo_base_label(rs)
     show_account = rs.github_account and rs.github_account != app.active_gh_account
-    vis_label = rs.visibility.lower() if rs.visibility else ("LOCAL" if not rs.remote_url else "")
+    is_public = rs.visibility == "PUBLIC"
+    vis_label = "** PUBLIC **" if is_public else (rs.visibility.lower() if rs.visibility else ("LOCAL" if not rs.remote_url else ""))
 
     right_parts = []
     if rs.last_commit_date:
@@ -2330,6 +2331,8 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
         dpg.bind_item_theme(rs.header_tag, "force_pause_header_theme")
     elif override == "active":
         dpg.bind_item_theme(rs.header_tag, "force_active_header_theme")
+    elif is_public:
+        dpg.bind_item_theme(rs.header_tag, "public_header_theme")
 
     # Sync warning banner — prominent when behind remote
     if rs.behind > 0 or rs.ahead > 0:
@@ -3946,6 +3949,13 @@ def main():
             dpg.add_theme_color(dpg.mvThemeCol_Header, (30, 65, 40))
             dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (40, 78, 50))
             dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (50, 90, 60))
+
+    # Public repo header theme (orange-tinted for scrutiny)
+    with dpg.theme(tag="public_header_theme"):
+        with dpg.theme_component(dpg.mvCollapsingHeader):
+            dpg.add_theme_color(dpg.mvThemeCol_Header, (80, 55, 20))
+            dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (95, 65, 25))
+            dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (110, 75, 30))
 
     # Small remove-button theme (red text, no background)
     with dpg.theme() as remove_btn_theme:
