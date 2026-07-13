@@ -3950,12 +3950,12 @@ def main():
             dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (40, 78, 50))
             dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (50, 90, 60))
 
-    # Public repo header theme (orange-tinted for scrutiny)
+    # Public repo header theme (dark teal tint)
     with dpg.theme(tag="public_header_theme"):
         with dpg.theme_component(dpg.mvCollapsingHeader):
-            dpg.add_theme_color(dpg.mvThemeCol_Header, (80, 55, 20))
-            dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (95, 65, 25))
-            dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (110, 75, 30))
+            dpg.add_theme_color(dpg.mvThemeCol_Header, (30, 55, 60))
+            dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (38, 68, 75))
+            dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (46, 80, 90))
 
     # Small remove-button theme (red text, no background)
     with dpg.theme() as remove_btn_theme:

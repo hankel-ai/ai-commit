@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Public Repo Header Color Options</title>
+<style>
+  body { background: rgb(30,30,35); color: rgb(220,220,225); font-family: 'Segoe UI', sans-serif; padding: 30px; }
+  h1 { font-size: 20px; margin-bottom: 5px; }
+  .subtitle { color: rgb(120,120,130); font-size: 13px; margin-bottom: 30px; }
+  .option { margin-bottom: 24px; display: flex; align-items: center; gap: 20px; }
+  .label { width: 160px; font-size: 14px; flex-shrink: 0; }
+  .label small { color: rgb(120,120,130); font-size: 11px; display: block; margin-top: 2px; }
+  .swatches { display: flex; gap: 2px; }
+  .swatch { width: 220px; height: 36px; display: flex; align-items: center; padding: 0 14px;
+            font-size: 13px; border-radius: 3px; cursor: default; }
+  .swatch span { opacity: 0.6; font-size: 11px; margin-left: auto; }
+  .header-mock { flex: 1; max-width: 600px; border-radius: 4px; overflow: hidden; }
+  .header-bar { height: 32px; display: flex; align-items: center; padding: 0 12px; font-size: 13px; gap: 8px; }
+  .header-bar .arrow { font-size: 10px; opacity: 0.7; }
+  .header-bar .vis { font-size: 11px; opacity: 0.8; }
+  .header-bar .status { margin-left: auto; color: rgb(120,120,130); font-size: 12px; }
+  .divider { border: none; border-top: 1px solid rgb(55,55,65); margin: 30px 0; }
+  .current { border: 1px solid rgb(220,80,80); border-radius: 6px; padding: 8px 12px; }
+  .current .label small { color: rgb(220,80,80); }
+  .reference { margin-top: 40px; }
+  .reference h2 { font-size: 15px; margin-bottom: 12px; }
+  .ref-row { display: flex; gap: 12px; margin-bottom: 8px; align-items: center; }
+  .ref-swatch { width: 180px; height: 28px; display: flex; align-items: center; padding: 0 12px;
+                font-size: 12px; border-radius: 3px; }
+  .ref-label { font-size: 12px; color: rgb(120,120,130); width: 120px; }
+</style>
+</head>
+<body>
+
+<h1>Public Repo Header Color Options</h1>
+<p class="subtitle">Pick a replacement for the current orange-brown. Each row shows Normal / Hovered / Active states + a mock header.</p>
+
+<div class="option current">
+  <div class="label">Current (orange-brown)<small>REPLACING THIS</small></div>
+  <div class="swatches">
+    <div class="swatch" style="background:rgb(80,55,20)">Normal <span>80,55,20</span></div>
+    <div class="swatch" style="background:rgb(95,65,25)">Hover <span>95,65,25</span></div>
+    <div class="swatch" style="background:rgb(110,75,30)">Active <span>110,75,30</span></div>
+  </div>
+  <div class="header-mock">
+    <div class="header-bar" style="background:rgb(80,55,20)">
+      <span class="arrow">&#9654;</span> hankel-ai/public-repo <span class="vis">** PUBLIC **</span> <span class="status">main &middot; Clean</span>
+    </div>
+  </div>
+</div>
+
+<hr class="divider">
+
+<div class="option" id="opt1">
+  <div class="label">1. Dark Purple<small>User suggestion</small></div>
+  <div class="swatches">
+    <div class="swatch" style="background:rgb(55,35,75)">Normal <span>55,35,75</span></div>
+    <div class="swatch" style="background:rgb(68,45,90)">Hover <span>68,45,90</span></div>
+    <div class="swatch" style="background:rgb(80,55,105)">Active <span>80,55,105</span></div>
+  </div>
+  <div class="header-mock">
+    <div class="header-bar" style="background:rgb(55,35,75)">
+      <span class="arrow">&#9654;</span> hankel-ai/public-repo <span class="vis">** PUBLIC **</span> <span class="status">main &middot; Clean</span>
+    </div>
+  </div>
+</div>
+
+<div class="option" id="opt2">
+  <div class="label">2. Muted Indigo<small>Subtle blue-purple</small></div>
+  <div class="swatches">
+    <div class="swatch" style="background:rgb(48,42,72)">Normal <span>48,42,72</span></div>
+    <div class="swatch" style="background:rgb(58,52,88)">Hover <span>58,52,88</span></div>
+    <div class="swatch" style="background:rgb(68,62,104)">Active <span>68,62,104</span></div>
+  </div>
+  <div class="header-mock">
+    <div class="header-bar" style="background:rgb(48,42,72)">
+      <span class="arrow">&#9654;</span> hankel-ai/public-repo <span class="vis">** PUBLIC **</span> <span class="status">main &middot; Clean</span>
+    </div>
+  </div>
+</div>
+
+<div class="option" id="opt3">
+  <div class="label">3. Deep Plum<small>Rich but restrained</small></div>
+  <div class="swatches">
+    <div class="swatch" style="background:rgb(60,32,55)">Normal <span>60,32,55</span></div>
+    <div class="swatch" style="background:rgb(75,42,68)">Hover <span>75,42,68</span></div>
+    <div class="swatch" style="background:rgb(88,52,80)">Active <span>88,52,80</span></div>
+  </div>
+  <div class="header-mock">
+    <div class="header-bar" style="background:rgb(60,32,55)">
+      <span class="arrow">&#9654;</span> hankel-ai/public-repo <span class="vis">** PUBLIC **</span> <span class="status">main &middot; Clean</span>
+    </div>
+  </div>
+</div>
+
+<div class="option" id="opt4">
+  <div class="label">4. Dark Teal<small>Cool alternative</small></div>
+  <div class="swatches">
+    <div class="swatch" style="background:rgb(30,55,60)">Normal <span>30,55,60</span></div>
+    <div class="swatch" style="background:rgb(38,68,75)">Hover <span>38,68,75</span></div>
+    <div class="swatch" style="background:rgb(46,80,90)">Active <span>46,80,90</span></div>
+  </div>
+  <div class="header-mock">
+    <div class="header-bar" style="background:rgb(30,55,60)">
+      <span class="arrow">&#9654;</span> hankel-ai/public-repo <span class="vis">** PUBLIC **</span> <span class="status">main &middot; Clean</span>
+    </div>
+  </div>
+</div>
+
+<div class="option" id="opt5">
+  <div class="label">5. Slate Violet<small>Barely-there tint</small></div>
+  <div class="swatches">
+    <div class="swatch" style="background:rgb(50,45,65)">Normal <span>50,45,65</span></div>
+    <div class="swatch" style="background:rgb(62,55,80)">Hover <span>62,55,80</span></div>
+    <div class="swatch" style="background:rgb(72,65,95)">Active <span>72,65,95</span></div>
+  </div>
+  <div class="header-mock">
+    <div class="header-bar" style="background:rgb(50,45,65)">
+      <span class="arrow">&#9654;</span> hankel-ai/public-repo <span class="vis">** PUBLIC **</span> <span class="status">main &middot; Clean</span>
+    </div>
+  </div>
+</div>
+
+<div class="reference">
+  <h2>For context: existing header themes</h2>
+  <div class="ref-row">
+    <div class="ref-label">Default (private)</div>
+    <div class="ref-swatch" style="background:rgb(45,48,62)">45, 48, 62</div>
+  </div>
+  <div class="ref-row">
+    <div class="ref-label">Force-paused (red)</div>
+    <div class="ref-swatch" style="background:rgb(80,30,30)">80, 30, 30</div>
+  </div>
+  <div class="ref-row">
+    <div class="ref-label">Force-active (green)</div>
+    <div class="ref-swatch" style="background:rgb(30,65,40)">30, 65, 40</div>
+  </div>
+</div>
+
+</body>
+</html>
