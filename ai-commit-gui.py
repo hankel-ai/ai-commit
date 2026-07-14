@@ -304,6 +304,7 @@ class AppState:
     actions_popup_enabled: bool = True
     chime_on_completion: bool = False
     show_non_git_folders: bool = True
+    sort_by_date: bool = False  # True = newest-first; False = alphabetical
     recent_only: bool = True  # hide idle repos (old + clean) from the list
     recent_days: int = 14  # a commit within this many days counts as "recent"
     idle_poll_interval: int = 900  # seconds between polls of idle-tier repos
@@ -379,6 +380,7 @@ def _save_settings():
             "recent_days": app.recent_days,
             "idle_poll_interval": app.idle_poll_interval,
             "repo_overrides": app.repo_overrides,
+            "sort_by_date": app.sort_by_date,
         }
         _SETTINGS_FILE.write_text(json.dumps(data))
     except Exception:
@@ -1368,6 +1370,15 @@ def cb_recent_only(sender, app_data):
     for tag in ("recent_only_cb", "settings_recent_only_cb"):
         if tag != sender and dpg.does_item_exist(tag):
             dpg.set_value(tag, app.recent_only)
+    _save_settings()
+    if app.last_results or app.last_non_git:
+        rebuild_repos_ui(app.last_results, app.last_non_git, preserve_open=True)
+    else:
+        trigger_poll()
+
+
+def cb_sort_by_date(sender, app_data):
+    app.sort_by_date = bool(dpg.get_value(sender))
     _save_settings()
     if app.last_results or app.last_non_git:
         rebuild_repos_ui(app.last_results, app.last_non_git, preserve_open=True)
@@ -3053,6 +3064,8 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
     any_changes = False
     def _display_sort_key(item):
         _, info = item
+        if app.sort_by_date:
+            return -info.get("last_commit_ts", 0.0)
         git_name = _repo_name_from_url(info.get("remote_url", ""))
         return (git_name or info["path"].name).lower()
 
@@ -3143,7 +3156,7 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
     # sticky error visible. Hidden repos stay in app.repos (state/polling continue).
     now = time.time()
     hidden_count = 0
-    for rs in sorted(new_repos.values(), key=lambda r: r.name.lower()):
+    for rs in sorted(new_repos.values(), key=lambda r: -r.last_commit_ts if app.sort_by_date else r.name.lower()):
         if app.recent_only:
             repo_force_active = app.repo_overrides.get(str(rs.path), "") == "active"
             sticky_error = rs.gen_status == GenStatus.ERROR
@@ -3159,7 +3172,7 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
     # modification time in place of git signals (no commits/dirty state to go
     # on). Hidden folders stay in app.non_git_folders so toggling re-shows them.
     if app.show_non_git_folders:
-        for ngf in sorted(new_non_git.values(), key=lambda n: str(n.path).lower()):
+        for ngf in sorted(new_non_git.values(), key=lambda n: -n.mtime if app.sort_by_date else str(n.path).lower()):
             if app.recent_only and not is_folder_recent(ngf.mtime, now,
                                                         app.recent_days):
                 hidden_count += 1
@@ -3871,6 +3884,7 @@ def main():
         app.recent_days = saved.get("recent_days", 14)
         app.idle_poll_interval = saved.get("idle_poll_interval", 900)
         app.repo_overrides = saved.get("repo_overrides", {})
+        app.sort_by_date = saved.get("sort_by_date", False)
         if not folders_from_cli:
             # Support new list format and migrate old single-folder format
             saved_folders = saved.get("watched_folders", [])
@@ -3983,6 +3997,9 @@ def main():
             dpg.add_checkbox(label="Recent", tag="recent_only_cb",
                              default_value=app.recent_only, callback=cb_recent_only)
             dpg.add_text("", tag="hidden_count_label", color=COL_DIM)
+            dpg.add_spacer(width=6)
+            dpg.add_checkbox(label="By Date", tag="sort_by_date_cb",
+                             default_value=app.sort_by_date, callback=cb_sort_by_date)
 
         dpg.add_separator()
 
