@@ -3065,7 +3065,8 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
     def _display_sort_key(item):
         _, info = item
         if app.sort_by_date:
-            return -info.get("last_commit_ts", 0.0)
+            has_changes = 0 if info.get("entries") else 1
+            return (has_changes, -info.get("last_commit_ts", 0.0))
         git_name = _repo_name_from_url(info.get("remote_url", ""))
         return (git_name or info["path"].name).lower()
 
@@ -3156,7 +3157,7 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
     # sticky error visible. Hidden repos stay in app.repos (state/polling continue).
     now = time.time()
     hidden_count = 0
-    for rs in sorted(new_repos.values(), key=lambda r: -r.last_commit_ts if app.sort_by_date else r.name.lower()):
+    for rs in sorted(new_repos.values(), key=lambda r: (0 if r.entries else 1, -r.last_commit_ts) if app.sort_by_date else r.name.lower()):
         if app.recent_only:
             repo_force_active = app.repo_overrides.get(str(rs.path), "") == "active"
             sticky_error = rs.gen_status == GenStatus.ERROR
@@ -3993,13 +3994,15 @@ def main():
             dpg.add_button(label="Pause", tag="pause_btn", callback=cb_pause)
             dpg.add_button(label="Settings", callback=cb_open_settings)
             dpg.add_button(label="Activity Log", callback=cb_open_activity_log)
-            dpg.add_spacer(width=10)
+            dpg.add_checkbox(label="Date", tag="sort_by_date_cb",
+                             default_value=app.sort_by_date, callback=cb_sort_by_date)
+            with dpg.tooltip(dpg.last_item()):
+                dpg.add_text("Sort by date")
             dpg.add_checkbox(label="Recent", tag="recent_only_cb",
                              default_value=app.recent_only, callback=cb_recent_only)
+            with dpg.tooltip(dpg.last_item()):
+                dpg.add_text("Show only recently modified")
             dpg.add_text("", tag="hidden_count_label", color=COL_DIM)
-            dpg.add_spacer(width=6)
-            dpg.add_checkbox(label="By Date", tag="sort_by_date_cb",
-                             default_value=app.sort_by_date, callback=cb_sort_by_date)
 
         dpg.add_separator()
 
