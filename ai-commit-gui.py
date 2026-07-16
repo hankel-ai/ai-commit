@@ -2395,13 +2395,16 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
     # Expandable MORE panel (populated lazily on click)
     rs.more_group_tag = dpg.add_group(parent=rs.header_tag, show=False)
 
-    # Full latest commit message on its own line
+    # Latest commit — show only the subject (first line) inline. The full
+    # message (subject + body) lives in the MORE panel; a trailing "…" hints
+    # that there's more to see when the message has a body. The date is omitted
+    # here since it already appears in the header label (see _repo_base_label).
     if rs.last_commit_msg:
-        if rs.last_commit_date:
-            full_commit_text = f"  latest: {rs.last_commit_msg} - {rs.last_commit_date}"
-        else:
-            full_commit_text = f"  latest: {rs.last_commit_msg}"
-        dpg.add_text(full_commit_text, color=COL_DIM, parent=rs.header_tag, wrap=0)
+        subject, _, body = rs.last_commit_msg.partition("\n")
+        subject = subject.strip()
+        more_hint = " ..." if body.strip() else ""
+        dpg.add_text(f"  latest: {subject}{more_hint}", color=COL_DIM,
+                     parent=rs.header_tag, wrap=0)
 
     rs.files_group_tag = dpg.add_group(parent=rs.header_tag)
     repo_key = str(rs.path)
@@ -2665,6 +2668,14 @@ def _build_more_panel(rs, repo_key, data):
     dpg.configure_item(parent, show=True)
 
     has_content = False
+
+    # Full latest commit message (subject + body). The header shows only the
+    # subject line; the complete message is revealed here.
+    if rs.last_commit_msg:
+        has_content = True
+        dpg.add_text("  Latest commit message:", color=COL_ACCENT, parent=parent)
+        indented = "\n".join("    " + ln for ln in rs.last_commit_msg.splitlines())
+        dpg.add_text(indented, color=COL_DIM, parent=parent, wrap=0)
 
     # A. Gitignored files
     ignored = data.get("ignored_files", [])
