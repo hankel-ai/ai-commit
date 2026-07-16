@@ -3388,6 +3388,11 @@ def process_queue():
                     "behind": rs.behind,
                 }
             merged[repo_name] = info
+            # Keep the no-poll re-render cache in sync with what we just rendered,
+            # or the Date/Recent toggles (which re-render from app.last_results)
+            # resurrect this repo's stale pre-refresh entries.
+            app.last_results = merged
+            app.last_non_git = _non_git_for_rebuild()
             rebuild_repos_ui(merged, _non_git_for_rebuild(), preserve_open=True)
 
         elif kind == "refresh_then_generate":
@@ -3410,6 +3415,9 @@ def process_queue():
                     "behind": rs.behind,
                 }
             merged[repo_name] = info
+            # Keep the no-poll re-render cache in sync (see single_repo_refresh).
+            app.last_results = merged
+            app.last_non_git = _non_git_for_rebuild()
             rebuild_repos_ui(merged, _non_git_for_rebuild(), preserve_open=True)
             # Now kick off generation if there are still changes
             rs = app.repos.get(repo_name)
