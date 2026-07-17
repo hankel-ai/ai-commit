@@ -37,16 +37,22 @@ Default model: `qwen3-coder:480b-cloud` (configurable via settings or `AI_COMMIT
 
 ## Run / Build
 
-```bash
-# Install deps
-pip install -r requirements.txt
+Launchers use an **isolated venv OUTSIDE OneDrive** at `%USERPROFILE%\.venvs\ai-commit`
+(avoids OneDrive sync churn). `g-ui.cmd` / `g.cmd` self-bootstrap it on first run
+(create venv + `pip install -r requirements.txt`) and self-heal if a dep goes missing.
+Never rely on system Python — a July 2026 global-Python reinstall wiped its packages
+(see `python312-reinstall-wiped-global-packages` memory).
 
-# Run GUI
-python ai-commit-gui.py [folder...]
-
-# Run CLI
-python ai-commit.py [folder] [--provider ollama] [--model qwen3-coder:480b-cloud]
+```bat
+g-ui.cmd [folder...]   :: GUI (launches venv pythonw, windowless)
+g.cmd [folder] [--provider ollama] [--model qwen3-coder:480b-cloud]   :: CLI
 ```
+
+**Autostart:** the GUI auto-starts via HKCU `...\Run\AICommitMonitor`, which points
+**directly** at `%USERPROFILE%\.venvs\ai-commit\Scripts\pythonw.exe ...\Programs\ai-commit\ai-commit-gui.py`
+(bypasses `g-ui.cmd`, so the venv must already exist — run `g-ui.cmd` once after any venv wipe).
+
+Raw (venv must exist): `%USERPROFILE%\.venvs\ai-commit\Scripts\python.exe ai-commit-gui.py`
 
 ## Architecture
 
