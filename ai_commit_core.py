@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 
@@ -426,6 +427,43 @@ def compute_header_open(*, override, paused, has_activity, force_expand,
     return has_activity
 
 
+def parse_commit_date(date_str):
+    """Convert a git ``%ci`` timestamp to ``(short_date, commit_ts)`` in local time.
+
+    ``%ci`` is written in the *committer's* timezone with an explicit offset
+    (``2026-07-20 21:30:00 +0530``). The offset is honoured and the result
+    re-rendered in the *viewer's* zone, so a commit pushed by a colleague in IST
+    or by a CI runner on UTC reads as the local wall-clock time it happened at —
+    not as a stamp hours in the future. ``commit_ts`` is the absolute epoch, so
+    the ``is_repo_active`` recency window is measured against the real instant.
+
+    A ``%ci`` without an offset is assumed local; anything unparseable degrades to
+    the leading 16 characters with a ``0.0`` timestamp. Pure/testable — see
+    ``tests/test_commit_date.py``.
+    """
+    date_str = (date_str or "").strip()
+    if not date_str:
+        return "", 0.0
+    dt = None
+    for text, fmt in ((date_str[:25], "%Y-%m-%d %H:%M:%S %z"),
+                      (date_str[:19], "%Y-%m-%d %H:%M:%S")):
+        try:
+            dt = datetime.strptime(text, fmt)
+            break
+        except ValueError:
+            continue
+    if dt is None:
+        return date_str[:16], 0.0
+    try:
+        if dt.tzinfo is None:      # no offset in %ci — treat as local
+            dt = dt.astimezone()
+        local = dt.astimezone()
+        short_date = local.strftime("%b %d %I:%M%p").replace("AM", "am").replace("PM", "pm")
+        return short_date, dt.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return date_str[:16], 0.0
+
+
 def get_last_commit(cwd):
     """Return (full_message, short_date, commit_ts) for HEAD, or ("", "", 0.0).
 
@@ -433,26 +471,13 @@ def get_last_commit(cwd):
     then ``%B`` (the free-form, possibly multi-line message). Split on only the
     first newline so the body's own newlines never collide with the date.
 
-    ``commit_ts`` is the committer date as an epoch float (``0.0`` if unparseable)
-    — used by ``is_repo_active`` for the recency tier. The tz offset in ``%ci`` is
-    dropped before parsing; the resulting naive local time is close enough for a
-    day-granularity "within N days" window.
+    The date is converted to the viewer's local timezone by ``parse_commit_date``.
     """
     rc, out, _ = run_git(["log", "-1", "--format=%ci%n%B"], cwd=cwd)
     if rc != 0:
         return "", "", 0.0
     date_str, _, msg_out = out.partition("\n")
-    date_str = date_str.strip()
-    short_date = ""
-    commit_ts = 0.0
-    if date_str:
-        try:
-            from datetime import datetime
-            dt = datetime.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
-            short_date = dt.strftime("%b %d %I:%M%p").replace("AM", "am").replace("PM", "pm")
-            commit_ts = dt.timestamp()
-        except (ValueError, IndexError, OverflowError, OSError):
-            short_date = date_str[:16]
+    short_date, commit_ts = parse_commit_date(date_str)
     return msg_out.strip(), short_date, commit_ts
 
 
