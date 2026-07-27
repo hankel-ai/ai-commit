@@ -1,4 +1,4 @@
-"""Shared logic for AI commit message generation — used by both CLI and GUI."""
+"""Shared logic for AI commit message generation -- used by both CLI and GUI."""
 
 import fnmatch
 import json
@@ -26,7 +26,7 @@ SYSTEM_PROMPT = (
 MAX_DIFF_CHARS = 8000
 
 # Untracked files whose basename matches any of these patterns have their
-# content withheld from the LLM prompt — the diff sent to the AI provider may
+# content withheld from the LLM prompt -- the diff sent to the AI provider may
 # leave the machine (e.g. Ollama cloud models), and files like these tend to
 # hold credentials that aren't gitignored yet.
 SENSITIVE_FILE_PATTERNS = (
@@ -72,7 +72,7 @@ def set_git_logger(fn):
 
 
 # Per-repo serialization. The GUI runs git on a thread pool plus a polling loop,
-# so two commands can hit the same repo at once — one then fails on `index.lock`
+# so two commands can hit the same repo at once -- one then fails on `index.lock`
 # and (via get_status returning [] on error) can be misread as a clean tree,
 # bypassing the branch-switch confirm gate. A lock per repo dir guarantees only
 # one git command runs in a given repo at a time. Locks are leaf-level (run_git
@@ -141,7 +141,7 @@ def _unquote_path(p):
 def read_status(cwd):
     """Run ``git status --porcelain`` and return ``(ok, entries)``.
 
-    ``ok`` is False when git itself failed (non-zero exit — e.g. a concurrent op
+    ``ok`` is False when git itself failed (non-zero exit -- e.g. a concurrent op
     held ``index.lock``), which is NOT the same as a clean tree. Callers that
     make destructive decisions (branch switch) must treat ``ok=False`` as
     "unknown" and refuse to proceed, never as "clean".
@@ -231,13 +231,13 @@ def parse_branch_header(line):
 def read_status_branch(cwd):
     """Run ``git status --porcelain --branch`` once; return (ok, entries, info).
 
-    ``ok`` is False when git itself failed (non-zero exit) — same contract as
+    ``ok`` is False when git itself failed (non-zero exit) -- same contract as
     :func:`read_status` (a failure is NOT a clean tree). ``entries`` is the same
     ``(code, filepath)`` list as :func:`get_status`; ``info`` is the parsed
     branch header (see :func:`parse_branch_header`).
 
     This is the folded poll path: one spawn yields dirty state, current branch,
-    ahead/behind, and branch classification together. Note: it does NOT fetch —
+    ahead/behind, and branch classification together. Note: it does NOT fetch --
     ahead/behind is measured against the local remote-tracking ref, identical to
     ``get_sync_status(fetch=False)``. Callers wanting fresh counts must call
     :func:`fetch_remote` first.
@@ -272,7 +272,7 @@ def fetch_remote(cwd):
 def get_git_global_user():
     """Return (global_name, global_email) from ``git config --global``.
 
-    Read once at GUI startup for the toolbar identity label — not per repo,
+    Read once at GUI startup for the toolbar identity label -- not per repo,
     so it doesn't flood the activity log.
     """
     rc_n, name, _ = run_git(["config", "--global", "user.name"], cwd=".")
@@ -401,7 +401,7 @@ def compute_header_open(*, override, paused, has_activity, force_expand,
 
     ``preserve_open`` is True for *partial* rebuilds (e.g. single-repo refresh,
     refresh-then-generate) where the user's current expand/collapse state must
-    survive the rebuild — repos must NOT be auto-collapsed. It is False for
+    survive the rebuild -- repos must NOT be auto-collapsed. It is False for
     *full* refreshes (the automatic poll loop or a manual Refresh-all), which
     are the only cases where the activity-based default is (re)applied.
 
@@ -433,12 +433,12 @@ def parse_commit_date(date_str):
     ``%ci`` is written in the *committer's* timezone with an explicit offset
     (``2026-07-20 21:30:00 +0530``). The offset is honoured and the result
     re-rendered in the *viewer's* zone, so a commit pushed by a colleague in IST
-    or by a CI runner on UTC reads as the local wall-clock time it happened at —
+    or by a CI runner on UTC reads as the local wall-clock time it happened at --
     not as a stamp hours in the future. ``commit_ts`` is the absolute epoch, so
     the ``is_repo_active`` recency window is measured against the real instant.
 
     A ``%ci`` without an offset is assumed local; anything unparseable degrades to
-    the leading 16 characters with a ``0.0`` timestamp. Pure/testable — see
+    the leading 16 characters with a ``0.0`` timestamp. Pure/testable -- see
     ``tests/test_commit_date.py``.
     """
     date_str = (date_str or "").strip()
@@ -455,7 +455,7 @@ def parse_commit_date(date_str):
     if dt is None:
         return date_str[:16], 0.0
     try:
-        if dt.tzinfo is None:      # no offset in %ci — treat as local
+        if dt.tzinfo is None:      # no offset in %ci -- treat as local
             dt = dt.astimezone()
         local = dt.astimezone()
         short_date = local.strftime("%b %d %I:%M%p").replace("AM", "am").replace("PM", "pm")
@@ -488,7 +488,7 @@ def is_repo_active(commit_ts, dirty, ahead, behind, now, recent_days):
     (ahead/behind), or the last commit is within *recent_days*. Otherwise the repo
     is idle: hidden by the recency filter and polled on the slow idle cadence.
 
-    Pure/testable tier decision — see docs/polling-performance.md and
+    Pure/testable tier decision -- see docs/polling-performance.md and
     tests/test_recency.py.
     """
     if dirty or ahead or behind:
@@ -504,7 +504,7 @@ def is_folder_recent(mtime, now, recent_days):
     Folder counterpart of ``is_repo_active`` for directories with no git signals:
     recent when the folder's modification time is within *recent_days*. An
     unknown mtime (``0.0``, e.g. ``stat`` failed) counts as recent so a folder
-    is never silently hidden. Pure/testable — see tests/test_recency.py.
+    is never silently hidden. Pure/testable -- see tests/test_recency.py.
     """
     if not mtime:
         return True
@@ -518,7 +518,7 @@ def get_sync_status(cwd, fetch=True):
     Returns (0, 0) if there is no remote or no tracking branch.
     """
     if fetch:
-        # Fetch silently — ignore errors (offline, no remote, etc.).
+        # Fetch silently -- ignore errors (offline, no remote, etc.).
         # --prune drops stale remote-tracking refs so branch_status detection
         # ("stale" vs "local only" vs synced) stays accurate.
         run_git(["fetch", "--prune", "--quiet"], cwd=cwd)
@@ -550,7 +550,7 @@ def get_branch_classification(cwd):
                     last fetch ran with --prune).
     ""           -> upstream exists; branch is in sync (ahead/behind aside).
     """
-    # Skip classification entirely for repos with no remote configured —
+    # Skip classification entirely for repos with no remote configured --
     # the header already shows "LOCAL", so per-branch "(local only)" is noise.
     rc, remotes_out, _ = run_git(["remote"], cwd=cwd)
     if rc != 0 or not remotes_out.strip():
@@ -651,7 +651,7 @@ def get_diff(cwd):
         if not filepath:
             continue
         full = Path(cwd) / filepath
-        # Never follow symlinks — a link pointing outside the repo would leak
+        # Never follow symlinks -- a link pointing outside the repo would leak
         # its target's content into the prompt.
         if full.is_symlink():
             parts.append(f"--- /dev/null\n+++ b/{filepath}\n(new symlink, content not included)")
@@ -755,7 +755,7 @@ def generate_message_kiro(diff, model):
             wsl_path = win_path
 
         # Pipe file content into kiro-cli stdin (avoids bash arg-length limits).
-        # shlex.quote both values — they end up inside a bash -lc string, so an
+        # shlex.quote both values -- they end up inside a bash -lc string, so an
         # unquoted model name from settings/env could inject shell commands.
         bash_cmd = (
             f"cat {shlex.quote(wsl_path)} | "
@@ -848,7 +848,7 @@ def do_commit_and_push(cwd, message):
 
     detail = stdout.strip()
 
-    # Push — skip if no remote configured
+    # Push -- skip if no remote configured
     rc_remote, _, _ = run_git(["remote", "get-url", "origin"], cwd=cwd)
     if rc_remote != 0:
         return True, False, "LOCAL_ONLY"

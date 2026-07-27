@@ -1,4 +1,4 @@
-"""GitHub Actions API client — run detection, job/step polling, log fetching.
+"""GitHub Actions API client -- run detection, job/step polling, log fetching.
 
 Pure-Python module with no GUI imports.
 """

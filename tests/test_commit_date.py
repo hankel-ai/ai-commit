@@ -1,11 +1,11 @@
-"""Tests for ai_commit_core.parse_commit_date — the pure ``%ci`` -> local-time
+"""Tests for ai_commit_core.parse_commit_date -- the pure ``%ci`` -> local-time
 conversion behind the ``[Jul 19 03:51pm]`` stamp in each repo header.
 
 ``git log --format=%ci`` prints the timestamp in the *committer's* timezone with
 an explicit offset (``2026-07-20 21:30:00 +0530``). The offset must be honoured
 and the result rendered in the *viewer's* local zone, otherwise a commit pushed
 from another timezone (a GitLab colleague in IST, a CI runner on UTC) displays as
-a wrong — often future — local time.
+a wrong -- often future -- local time.
 
 Every assertion here is timezone-independent: expectations are derived from the
 running machine's own zone rather than hardcoded, so the suite passes in EDT, IST
@@ -33,7 +33,7 @@ def check(name, cond):
 
 
 def _expected_stamp(ts):
-    """How the app should render epoch *ts* — formatted in the local zone."""
+    """How the app should render epoch *ts* -- formatted in the local zone."""
     return (datetime.fromtimestamp(ts)
             .strftime("%b %d %I:%M%p")
             .replace("AM", "am").replace("PM", "pm"))

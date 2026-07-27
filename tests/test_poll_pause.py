@@ -2,7 +2,7 @@
 
 Regression for: while paused with one repo forced active, the poll still ran
 `git rev-parse` (is_git_repo) on every repo each cycle. The paused fast-path
-should poll only the active repo and reuse cache for the rest — no discovery.
+should poll only the active repo and reuse cache for the rest -- no discovery.
 
 Run: python tests/test_poll_pause.py
 """
@@ -56,7 +56,7 @@ def test_paused_polls_only_active_repo():
     posted = []
     m.ui_queue = SimpleNamespace(put=lambda item: posted.append(item))
 
-    # Spies — discovery must not run; only the active repo gets a live status.
+    # Spies -- discovery must not run; only the active repo gets a live status.
     # The poll path is folded onto read_status_branch (see
     # docs/polling-performance.md); spy that instead of the old get_status.
     def spy_is_git_repo(p):

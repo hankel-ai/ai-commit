@@ -60,7 +60,7 @@ def _drive_single_refresh(stale_entries, fresh_info):
                            "ahead": 0, "behind": 0}},
         last_non_git={},
     )
-    # Stub the actual dpg rebuild — we only care about the cache side effect.
+    # Stub the actual dpg rebuild -- we only care about the cache side effect.
     m.rebuild_repos_ui = lambda *a, **kw: None
     m._non_git_for_rebuild = lambda: {}
 
@@ -73,7 +73,7 @@ def _drive_single_refresh(stale_entries, fresh_info):
 
 def test_last_results_synced_after_commit_refresh():
     """After the committed repo refreshes to a clean tree, the cached payload
-    used by the Date/Recent toggles must show it clean too — not the old diff."""
+    used by the Date/Recent toggles must show it clean too -- not the old diff."""
     fresh_info = {"path": Path("C:/repos/r1"), "entries": [], "remote_url": "",
                   "github_account": "", "visibility": "", "branch": "main",
                   "branch_status": "", "last_commit_msg": "feat: x",

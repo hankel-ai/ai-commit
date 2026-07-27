@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AI Commit Message Generator — CLI wrapper using ai_commit_core."""
+"""AI Commit Message Generator -- CLI wrapper using ai_commit_core."""
 
 import argparse
 import os

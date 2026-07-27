@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone activity-log viewer — runs as a separate OS window.
+"""Standalone activity-log viewer -- runs as a separate OS window.
 
 Launched by ai-commit-gui ("Activity Log" button). Tails the JSON Lines file
 written by ``activity_log`` so the user can watch, in real time, every git
@@ -165,7 +165,7 @@ class ActivityViewer:
         self._update_status()
 
     def _cb_clear(self):
-        """Clear the on-screen view only — does not touch the log file."""
+        """Clear the on-screen view only -- does not touch the log file."""
         self._all = []
         self._rebuild()
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AI Commit Monitor GUI — Dear PyGui desktop app for monitoring git repos."""
+"""AI Commit Monitor GUI -- Dear PyGui desktop app for monitoring git repos."""
 
 import argparse
 import json
@@ -116,7 +116,7 @@ from gh_workflows import (
 )
 
 # ---------------------------------------------------------------------------
-# Win32 API setup (Windows only) — declare argtypes so ctypes handles
+# Win32 API setup (Windows only) -- declare argtypes so ctypes handles
 # 64-bit HWND / pointer values correctly.
 # ---------------------------------------------------------------------------
 
@@ -189,7 +189,7 @@ if sys.platform == "win32":
     _user32.EnumWindows.argtypes = [WNDENUMPROC, ctypes.c_void_p]
     _user32.EnumWindows.restype = ctypes.c_bool
 
-    # DwmSetWindowAttribute — dark title bar
+    # DwmSetWindowAttribute -- dark title bar
     _dwmapi = ctypes.windll.dwmapi
     _dwmapi.DwmSetWindowAttribute.argtypes = [
         ctypes.c_void_p,   # HWND
@@ -199,7 +199,7 @@ if sys.platform == "win32":
     ]
     _dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
 
-    # CallWindowProcW — used to chain to the original WNDPROC after subclassing
+    # CallWindowProcW -- used to chain to the original WNDPROC after subclassing
     _user32.CallWindowProcW.argtypes = [
         ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
         ctypes.c_void_p, ctypes.c_void_p,
@@ -538,7 +538,7 @@ def _set_topmost(on_top):
             _hwnd, flag, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         )
     elif sys.platform == "darwin":
-        # Defer to run between render frames — calling setLevel_ during a
+        # Defer to run between render frames -- calling setLevel_ during a
         # DPG/GLFW render callback causes a SIGTRAP crash.
         global _pending_topmost
         _pending_topmost = on_top
@@ -710,7 +710,7 @@ def bg_poll_repos(force=False):
     """Discover repos and get status for each. Posts results to ui_queue.
 
     When *force* is True, bypass cached remote_url and always run a
-    network fetch — same behavior as a fresh startup. Used by the manual
+    network fetch -- same behavior as a fresh startup. Used by the manual
     Refresh button so a moved remote is picked up without restarting.
     """
     active_account = get_active_github_account()
@@ -720,7 +720,7 @@ def bg_poll_repos(force=False):
     results = {}
     non_git_results = {}
 
-    # While globally paused (and not a manual Refresh), skip the folder rescan —
+    # While globally paused (and not a manual Refresh), skip the folder rescan --
     # it runs `git rev-parse` on every repo just to rediscover them. Poll only
     # the force-active repos from the already-known set and reuse cached data for
     # the rest so they stay in the UI. New repos surface on Unpause or Refresh.
@@ -752,7 +752,7 @@ def bg_poll_repos(force=False):
                 else:
                     candidate_non_git.append(child)
         if not parent_is_repo and git_child_count == 0:
-            # Watched folder itself isn't git and has no git children — surface
+            # Watched folder itself isn't git and has no git children -- surface
             # the folder itself so it can be Init'd. Don't list its subfolders;
             # they'd just become part of that single new repo.
             non_git_paths.append(folder_path)
@@ -769,7 +769,7 @@ def bg_poll_repos(force=False):
                 continue
             # Idle tier: a known repo that isn't recent/active (clean, synced, last
             # commit older than recent_days) is polled only on the slow idle
-            # cadence — the CPU win for the many rarely-touched repos. New repos,
+            # cadence -- the CPU win for the many rarely-touched repos. New repos,
             # manual Refresh (force), and force-active overrides always poll live.
             # idle_last_poll holds each repo's last *live* poll time (stamped below
             # on every real poll), so a repo just polled as new/active isn't
@@ -800,7 +800,7 @@ def bg_refresh_single_repo(repo_name, force=False):
     """Re-poll a single repo and post its updated info to ui_queue.
 
     When *force* is True, bypass cached remote_url/visibility and
-    always run git fetch — same as the initial load or manual Refresh.
+    always run git fetch -- same as the initial load or manual Refresh.
     """
     rs = app.repos.get(repo_name)
     if not rs:
@@ -913,7 +913,7 @@ def cb_open_activity_log(sender=None, app_data=None):
 def _spawn_viewer_process(payload):
     """Launch gh_workflow_viewer.py, piping the payload JSON via stdin.
 
-    The payload contains the gh auth token, so it must never touch disk — a
+    The payload contains the gh auth token, so it must never touch disk -- a
     temp file would outlive us if the viewer failed to start.
     """
     viewer = str(Path(__file__).resolve().parent / "gh_workflow_viewer.py")
@@ -933,7 +933,7 @@ def _spawn_viewer_process(payload):
 def _launch_workflow_viewer(repo_name, rs):
     """Check for workflow runs, then launch viewer only if any exist.
 
-    Runs in background thread — blocks during detection polling.
+    Runs in background thread -- blocks during detection polling.
     Posts a workflow_check status to ui_queue so the GUI can surface
     silent failure modes (no gh token, no runs triggered, etc).
     """
@@ -1018,7 +1018,7 @@ def bg_push_override(repo_name, branch=""):
     Only invoked after the user confirms the override prompt for a push that
     was blocked by the secret-detection pre-receive hook. When *branch* is
     set, the blocked push was a --set-upstream push, so retry with it too.
-    Posts push_upstream_result — the success path there (status, collapse,
+    Posts push_upstream_result -- the success path there (status, collapse,
     refresh, Actions viewer) is exactly what a completed push needs.
     """
     rs = app.repos.get(repo_name)
@@ -1363,7 +1363,7 @@ def cb_show_non_git(sender, app_data):
 
 
 def cb_recent_only(sender, app_data):
-    """Toggle the recency display filter. Re-renders from the last poll payload —
+    """Toggle the recency display filter. Re-renders from the last poll payload --
     applying/removing the filter costs no git work."""
     app.recent_only = bool(dpg.get_value(sender))
     # Keep the toolbar + Settings checkboxes in sync (whichever was toggled).
@@ -1704,7 +1704,7 @@ def _cb_confirm_upstream(sender, app_data, user_data):
 
 
 def _show_secret_push_prompt(repo_name, branch=""):
-    """Push blocked by GitLab secret push protection — offer a one-time skip."""
+    """Push blocked by GitLab secret push protection -- offer a one-time skip."""
     rs = app.repos.get(repo_name)
     if not rs:
         return
@@ -1719,7 +1719,7 @@ def _show_secret_push_prompt(repo_name, branch=""):
         cmd += f" --set-upstream origin {branch}"
 
     with dpg.window(
-        label=f"Secret Push Protection — {rs.name}",
+        label=f"Secret Push Protection -- {rs.name}",
         tag=win_tag,
         width=pop_w, height=pop_h,
         pos=(px, py),
@@ -2345,7 +2345,7 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
     elif is_public:
         dpg.bind_item_theme(rs.header_tag, "public_header_theme")
 
-    # Sync warning banner — prominent when behind remote
+    # Sync warning banner -- prominent when behind remote
     if rs.behind > 0 or rs.ahead > 0:
         repo_key = str(rs.path)
         parts = []
@@ -2395,7 +2395,7 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
     # Expandable MORE panel (populated lazily on click)
     rs.more_group_tag = dpg.add_group(parent=rs.header_tag, show=False)
 
-    # Latest commit — show only the subject (first line) inline. The full
+    # Latest commit -- show only the subject (first line) inline. The full
     # message (subject + body) lives in the MORE panel; a trailing "…" hints
     # that there's more to see when the message has a body. The date is omitted
     # here since it already appears in the header label (see _repo_base_label).
@@ -2803,7 +2803,7 @@ def bg_switch_branch(repo_key, label, args, confirmed=False):
     ok, entries = read_status(cwd)
 
     # Fail safe: if the working tree can't be read (git busy / error), a failed
-    # status must NOT be mistaken for a clean tree — that would skip the confirm
+    # status must NOT be mistaken for a clean tree -- that would skip the confirm
     # gate and switch without stashing. Abort and let the user retry.
     if not ok:
         ui_queue.put(("more_action_result", repo_key, False,
@@ -2854,7 +2854,7 @@ def bg_switch_branch(repo_key, label, args, confirmed=False):
                 msg = f"Switched to {label} (restored stashed changes)"
             else:
                 msg = (f"Switched to {label}; stashed changes kept "
-                       f"(pop conflict — resolve manually)")
+                       f"(pop conflict -- resolve manually)")
 
     ui_queue.put(("more_action_result", repo_key, True, msg))
     bg_refresh_single_repo(repo_key)
@@ -3164,7 +3164,7 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
 
     # Render git repos first (sorted), then non-git folders at the bottom.
     # When "Recent only" is on, hide idle repos (clean, synced, last commit older
-    # than recent_days) — but always keep force-active repos and repos with a
+    # than recent_days) -- but always keep force-active repos and repos with a
     # sticky error visible. Hidden repos stay in app.repos (state/polling continue).
     now = time.time()
     hidden_count = 0
@@ -3274,7 +3274,7 @@ def process_queue():
                     dpg.set_value(rs.input_tag, "")
                 dpg.set_value(rs.status_tag, "Committed & pushed!")
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
-                # Fully synced now — let the upcoming partial rebuild re-apply
+                # Fully synced now -- let the upcoming partial rebuild re-apply
                 # the activity default so this (now idle) repo collapses instead
                 # of staying expanded under preserve_open.
                 app.collapse_on_next_build.add(repo_name)
@@ -3296,7 +3296,7 @@ def process_queue():
                 rs.commit_message = ""
                 if rs.input_tag and dpg.does_item_exist(rs.input_tag):
                     dpg.set_value(rs.input_tag, "")
-                dpg.set_value(rs.status_tag, f"No upstream for {branch} — set up tracking?")
+                dpg.set_value(rs.status_tag, f"No upstream for {branch} -- set up tracking?")
                 dpg.configure_item(rs.status_tag, color=COL_YELLOW)
                 _show_upstream_prompt(repo_name, branch)
             elif committed and not pushed:
@@ -3306,7 +3306,7 @@ def process_queue():
                     dpg.set_value(rs.input_tag, "")
                 rs.error_message = detail
                 update_repo_status(rs)
-                # GitLab secret push protection block — the commit landed, so
+                # GitLab secret push protection block -- the commit landed, so
                 # offer a one-time `-o secret_push_protection.skip_all` retry.
                 if is_secret_push_block(detail):
                     _show_secret_push_prompt(repo_name)
@@ -3325,7 +3325,7 @@ def process_queue():
                 rs.gen_status = GenStatus.IDLE
                 dpg.set_value(rs.status_tag, "Committed & pushed!")
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
-                # Fully synced now — collapse this idle repo on the next rebuild.
+                # Fully synced now -- collapse this idle repo on the next rebuild.
                 app.collapse_on_next_build.add(repo_name)
                 executor.submit(bg_refresh_single_repo, repo_name)
                 if app.actions_popup_enabled and rs.remote_url:
@@ -3334,7 +3334,7 @@ def process_queue():
                 rs.gen_status = GenStatus.ERROR
                 rs.error_message = f"Push failed: {detail}"
                 update_repo_status(rs)
-                # Blocked by secret push protection — retry must keep the
+                # Blocked by secret push protection -- retry must keep the
                 # --set-upstream since the branch still has no tracking ref.
                 if is_secret_push_block(detail):
                     _show_secret_push_prompt(repo_name, upstream_branch)
@@ -3364,7 +3364,7 @@ def process_queue():
                 if not old_label.endswith(" ..."):
                     dpg.configure_item(rs.header_tag, label=old_label + "  ...")
             elif dpg.does_item_exist("repos_container"):
-                # New repo being discovered — show placeholder
+                # New repo being discovered -- show placeholder
                 dpg.add_text(
                     f"  {repo_display_name}  ...",
                     color=COL_DIM, parent="repos_container",
@@ -3769,7 +3769,7 @@ def process_queue():
                 continue
             win_tag = dpg.generate_uuid()
             with dpg.window(
-                label="Switch branch — stash uncommitted changes?",
+                label="Switch branch -- stash uncommitted changes?",
                 tag=win_tag,
                 width=480, height=170,
                 no_collapse=True, modal=True,

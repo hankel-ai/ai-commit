@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone GitHub Actions workflow viewer — runs as a separate OS window.
+"""Standalone GitHub Actions workflow viewer -- runs as a separate OS window.
 
 Launched by ai-commit-gui after a successful push. Reads connection params
 from a temp JSON file passed as the first CLI argument, then polls the
@@ -567,7 +567,7 @@ def main():
     if sys.argv[1] == "-":
         # Payload (including the gh auth token) arrives via stdin so the
         # token never touches disk. Under pythonw sys.stdin can be None even
-        # when the parent passed a pipe — fall back to fd 0 directly.
+        # when the parent passed a pipe -- fall back to fd 0 directly.
         stream = sys.stdin.buffer if sys.stdin else open(0, "rb")
         data = json.loads(stream.read().decode("utf-8"))
     else:

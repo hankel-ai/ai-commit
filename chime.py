@@ -1,4 +1,4 @@
-"""Synthesize and play a melodic completion chime — no external deps.
+"""Synthesize and play a melodic completion chime -- no external deps.
 
 Renders a short bell-like WAV to %TEMP% on first use, then plays it via
 the platform's native sound API. Two variants: success (ascending C major
@@ -77,7 +77,7 @@ def _build_success():
 
 
 def _build_failure():
-    """E4 -> C4 descending minor third — disappointed, not jarring."""
+    """E4 -> C4 descending minor third -- disappointed, not jarring."""
     E4, C4 = 329.63, 261.63
     notes = [
         (0.00, E4, 0.30, 0.9),

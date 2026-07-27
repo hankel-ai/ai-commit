@@ -3,7 +3,7 @@
 Captures the git commands run under the hood plus high-level app events, writes
 them as JSON Lines to a well-known file, and keeps an in-memory ring buffer.
 The separate ``activity_log_viewer.py`` window tails that JSONL file so the user
-can watch everything the app is doing — and every git command it runs — in real
+can watch everything the app is doing -- and every git command it runs -- in real
 time.
 
 Dependency-light by design: imports only the standard library so it can be unit
@@ -147,7 +147,7 @@ def get_buffer():
 
 
 def clear_file():
-    """Truncate the on-disk log — call once at app startup for a fresh session."""
+    """Truncate the on-disk log -- call once at app startup for a fresh session."""
     try:
         Path(LOG_PATH).write_text("", encoding="utf-8")
     except OSError:
@@ -200,7 +200,7 @@ class FileTailer:
         except OSError:
             return []
         if size < self._offset:
-            self._offset = 0  # file shrank — truncated, start over
+            self._offset = 0  # file shrank -- truncated, start over
         try:
             with open(self.path, "rb") as fh:
                 # Validate the resume point is still a line boundary. If the file
@@ -221,7 +221,7 @@ class FileTailer:
         while True:
             nl = data.find(b"\n", start)
             if nl == -1:
-                break  # partial trailing line — re-read whole next call
+                break  # partial trailing line -- re-read whole next call
             raw = data[start:nl]
             self._offset += (nl - start) + 1
             start = nl + 1
@@ -238,7 +238,7 @@ class FileTailer:
 def install_git_logger():
     """Wire activity logging into ``ai_commit_core.run_git``.
 
-    Safe to call once at GUI startup. Keeps the core decoupled — it only knows
+    Safe to call once at GUI startup. Keeps the core decoupled -- it only knows
     about an optional callback, not about this module.
     """
     import ai_commit_core
