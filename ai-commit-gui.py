@@ -82,6 +82,7 @@ from ai_commit_core import (
     discover_repos,
     find_autostash_ref,
     do_commit_and_push,
+    describe_empty_diff,
     do_pull,
     is_secret_push_block,
     SECRET_PUSH_SKIP_OPTION,
@@ -843,7 +844,10 @@ def bg_generate_message(repo_name):
     try:
         diff = get_diff(rs.path)
         if not diff.strip():
-            ui_queue.put(("gen_result", repo_name, "", "No diff content available."))
+            # An empty diff on a repo git still calls dirty is almost always
+            # EOL normalization -- say so instead of a bare "no diff".
+            detail = describe_empty_diff(rs.path) or "No diff content available."
+            ui_queue.put(("gen_result", repo_name, "", detail))
             return
         config = {"provider": app.provider, "model": app.model, "url": app.ollama_url}
         activity_log.log_event(
@@ -1814,7 +1818,8 @@ def bg_launch_diff_viewer(repo_path, filepath):
         if rc2 == 0 and stdout2.strip():
             stdout = stdout2
         elif not stdout.strip():
-            stdout = "(no diff available)"
+            stdout = (describe_empty_diff(repo_path, only_path=filepath)
+                      or "(no diff available)")
     data = {"filepath": filepath, "diff": stdout}
     tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False,
@@ -2452,8 +2457,9 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
             parent=rs.header_tag,
         )
 
-        # Status line
-        rs.status_tag = dpg.add_text("", parent=rs.header_tag)
+        # Status line (wrap=0 -> wrap at panel width; error text can be several
+        # lines long, e.g. the EOL-only explanation from describe_empty_diff)
+        rs.status_tag = dpg.add_text("", parent=rs.header_tag, wrap=0)
         update_repo_status(rs)
 
         # Buttons row

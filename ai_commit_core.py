@@ -91,36 +91,50 @@ def _repo_lock(cwd):
         return lock
 
 
+def _run_git(args, cwd, binary=False):
+    """Shared runner for :func:`run_git` / :func:`run_git_bytes`."""
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    if not binary:
+        kwargs.update(text=True, encoding="utf-8", errors="replace")
+    start = time.perf_counter()
+    with _repo_lock(cwd):
+        result = subprocess.run(
+            ["git"] + args, cwd=cwd, capture_output=True, **kwargs
+        )
+    stderr = result.stderr
+    if binary:
+        stderr = stderr.decode("utf-8", "replace")
+    if _GIT_LOGGER is not None:
+        try:
+            _GIT_LOGGER(
+                args, cwd, result.returncode,
+                int((time.perf_counter() - start) * 1000),
+                stderr,
+            )
+        except Exception:
+            pass
+    return result.returncode, result.stdout, stderr
+
+
 def run_git(args, cwd):
     """Run a git command and return (returncode, stdout, stderr).
 
     Serialized per repo dir (see ``_repo_lock``) so concurrent app threads can't
     collide on the same repo's index.
     """
-    kwargs = {}
-    if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    start = time.perf_counter()
-    with _repo_lock(cwd):
-        result = subprocess.run(
-            ["git"] + args,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            **kwargs,
-        )
-    if _GIT_LOGGER is not None:
-        try:
-            _GIT_LOGGER(
-                args, cwd, result.returncode,
-                int((time.perf_counter() - start) * 1000),
-                result.stderr,
-            )
-        except Exception:
-            pass
-    return result.returncode, result.stdout, result.stderr
+    return _run_git(args, cwd)
+
+
+def run_git_bytes(args, cwd):
+    """Like :func:`run_git` but stdout stays raw ``bytes`` (stderr is decoded).
+
+    Text mode applies universal-newline translation, which rewrites CRLF to LF
+    in the captured output -- fatal when the *point* of the call is to inspect
+    line endings (see :func:`is_eol_only_change`).
+    """
+    return _run_git(args, cwd, binary=True)
 
 
 def is_git_repo(path):
@@ -673,6 +687,153 @@ def get_diff(cwd):
     if len(combined) > MAX_DIFF_CHARS:
         combined = combined[:MAX_DIFF_CHARS] + "\n\n[truncated -- diff too large]"
     return combined
+
+
+# ---------------------------------------------------------------------------
+# EOL-only changes: dirty in `git status`, invisible to `git diff`
+# ---------------------------------------------------------------------------
+#
+# With check-in normalization on (core.autocrlf=input/true, or a `* text=auto`
+# .gitattributes rule), a file whose only change is CRLF<->LF is listed by
+# `git status --porcelain` as ` M` but produces an EMPTY `git diff HEAD` --
+# git converts the working copy back to the committed blob on check-in, so
+# there is no content change at all and `git commit` says "nothing to commit".
+# get_diff() therefore returns "" and message generation has nothing to work
+# with; describe_empty_diff() turns that dead end into an explanation.
+
+MAX_EOL_PROBE_FILES = 50
+MAX_EOL_PROBE_BYTES = 2_000_000  # don't slurp huge files just to compare EOLs
+_EOL_MODIFIED_CODES = ("M", "MM", "AM", "RM", "MD")
+
+
+def _eol_normalize(data):
+    return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def is_eol_only_change(committed, working):
+    """True when two byte strings differ *only* in their line terminators."""
+    if committed == working:
+        return False
+    return _eol_normalize(committed) == _eol_normalize(working)
+
+
+def normalizes_to_same_content(committed, working):
+    """True when both byte strings are equal once line endings are normalized.
+
+    Broader than :func:`is_eol_only_change`: it also covers byte-identical
+    files, which git still reports as ` M` when the index's cached stat entry
+    came from a differently-converted checkout (e.g. core.autocrlf=true stores
+    LF but checks out CRLF, so an LF-ified working copy is dirty-but-diffless).
+    """
+    return _eol_normalize(committed) == _eol_normalize(working)
+
+
+def describe_eol_style(data):
+    """Name the line-ending style of *data*: CRLF / LF / CR / mixed."""
+    crlf = data.count(b"\r\n")
+    lf = data.count(b"\n") - crlf
+    cr = data.count(b"\r") - crlf
+    present = [name for name, count in (("CRLF", crlf), ("LF", lf), ("CR", cr)) if count]
+    if not present:
+        return "no line endings"
+    if len(present) == 1:
+        return present[0]
+    return "mixed " + "+".join(present)
+
+
+def _committed_blob(cwd, filepath):
+    """Raw bytes of *filepath* as stored in HEAD, or None if unavailable."""
+    rc, stdout, _ = run_git_bytes(["show", f"HEAD:{filepath}"], cwd=cwd)
+    if rc != 0:
+        return None
+    return stdout
+
+
+def find_eol_only_changes(cwd, entries=None, only_path=None):
+    """Find tracked files git calls modified but that produce no diff.
+
+    A file qualifies when its working copy normalizes to exactly the committed
+    content *and* ``git diff HEAD -- <file>`` is empty -- the latter check keeps
+    changes that merely happen to share their text (a mode change, say) out of
+    the "it's only line endings" story.
+
+    Returns a list of ``(filepath, committed_style, worktree_style)``.
+    """
+    if entries is None:
+        ok, entries = read_status(cwd)
+        if not ok:
+            return []
+    found = []
+    for code, filepath in entries[:MAX_EOL_PROBE_FILES]:
+        if code not in _EOL_MODIFIED_CODES:
+            continue
+        if only_path is not None and filepath != only_path:
+            continue
+        full = Path(cwd) / filepath
+        try:
+            if full.is_symlink() or not full.is_file():
+                continue
+            if full.stat().st_size > MAX_EOL_PROBE_BYTES:
+                continue
+            working = full.read_bytes()
+        except OSError:
+            continue
+        committed = _committed_blob(cwd, filepath)
+        if committed is None:
+            continue
+        if not normalizes_to_same_content(committed, working):
+            continue
+        rc, file_diff, _ = run_git(["diff", "HEAD", "--", filepath], cwd=cwd)
+        if rc != 0 or file_diff.strip():
+            continue
+        found.append(
+            (filepath, describe_eol_style(committed), describe_eol_style(working))
+        )
+    return found
+
+
+def describe_empty_diff(cwd, only_path=None):
+    """Explain an empty diff on a repo git still reports as dirty.
+
+    Returns "" when there is nothing to explain -- a genuinely clean tree, or
+    changes that do produce a diff.
+    """
+    ok, entries = read_status(cwd)
+    if not ok or not entries:
+        return ""
+    eol = find_eol_only_changes(cwd, entries, only_path=only_path)
+    if not eol:
+        return ""
+    rc, autocrlf, _ = run_git(["config", "--get", "core.autocrlf"], cwd=cwd)
+    setting = autocrlf.strip() if rc == 0 and autocrlf.strip() else "unset"
+    noun = "file differs" if len(eol) == 1 else "files differ"
+    lines = [f"{len(eol)} {noun} only in line endings - nothing to commit."]
+    for filepath, committed_style, working_style in eol:
+        if committed_style == working_style:
+            # Byte-identical to the blob: the checkout git expects is the
+            # converted one (autocrlf=true stores LF, checks out CRLF).
+            lines.append(
+                f"  {filepath}: {working_style} on disk, matching the committed blob"
+            )
+        else:
+            lines.append(
+                f"  {filepath}: {committed_style} committed, {working_style} on disk"
+            )
+    lines.append(
+        f"Git normalizes line endings on check-in (core.autocrlf={setting}), so the"
+    )
+    lines.append(
+        'committed content is unchanged and `git commit` reports "nothing to commit".'
+    )
+    # `text eol=...` only controls the *checkout*; it leaves the blob normalized,
+    # so it cannot make an EOL change committable. `-text` (no conversion) can.
+    lines.append(
+        "To store the on-disk endings instead, mark the path `-text` in .gitattributes"
+    )
+    lines.append(
+        "and run `git add --renormalize .` (`text eol=...` only affects checkout)."
+    )
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
