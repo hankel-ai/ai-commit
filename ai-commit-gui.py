@@ -104,6 +104,7 @@ from ai_commit_core import (
     read_status_branch,
     fetch_remote,
     is_git_repo,
+    verify_repo_usable,
     run_git,
 )
 
@@ -2513,7 +2514,9 @@ def build_non_git_section(ngf, parent, preserve_open=False, prior_open=None):
             label="Init",
             callback=cb_git_init, user_data=str(ngf.path))
         dpg.bind_item_theme(init_btn, green_btn_theme)
-    ngf.status_tag = dpg.add_text("", parent=ngf.header_tag)
+    # wrap=0 so a multi-line Init failure (e.g. the dubious-ownership
+    # explanation) wraps to the panel instead of running off the edge.
+    ngf.status_tag = dpg.add_text("", parent=ngf.header_tag, wrap=0)
 
 
 def cb_git_init(sender, app_data, user_data):
@@ -2522,11 +2525,22 @@ def cb_git_init(sender, app_data, user_data):
 
 
 def bg_git_init(folder_path):
-    """Run git init in a folder. Posts result to ui_queue."""
+    """Run git init in a folder. Posts result to ui_queue.
+
+    A zero exit from ``git init`` is not proof of a usable repo -- git happily
+    initializes a folder it will then refuse to read (see
+    :func:`ai_commit_core.verify_repo_usable`). Without this check the poll's
+    ``is_git_repo`` comes back False and the folder re-renders with an Init
+    button, so Init looks like it did nothing and stays clickable forever.
+    """
     try:
         rc, stdout, stderr = run_git(["init", "-b", "main"], cwd=folder_path)
         if rc == 0:
-            ui_queue.put(("git_init_result", folder_path, True, stdout.strip()))
+            ok, detail = verify_repo_usable(folder_path)
+            if ok:
+                ui_queue.put(("git_init_result", folder_path, True, stdout.strip()))
+            else:
+                ui_queue.put(("git_init_result", folder_path, False, detail))
         else:
             ui_queue.put(("git_init_result", folder_path, False, stderr.strip()))
     except Exception as exc:

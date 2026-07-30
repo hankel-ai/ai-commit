@@ -145,6 +145,90 @@ def is_git_repo(path):
     return Path(stdout.strip()).resolve() == Path(path).resolve()
 
 
+# Git refuses to run in a repo whose worktree owner isn't the current user
+# (the safe.directory hardening). On Windows a folder created by an *elevated*
+# process is owned by BUILTIN\Administrators (SID S-1-5-32-544) even though its
+# contents are owned by the user, so every git command in it exits 128 --
+# including the rev-parse behind :func:`is_git_repo`. That is why such a folder
+# keeps presenting as "not a git repo" no matter how often it is Init'd.
+_DUBIOUS_OWNERSHIP_MARKERS = ("detected dubious ownership", "unsafe repository")
+
+# The well-known owners worth naming; anything else is shown as a bare SID.
+_KNOWN_SIDS = {
+    "S-1-5-32-544": "BUILTIN\\Administrators",
+    "S-1-5-18": "NT AUTHORITY\\SYSTEM",
+}
+
+
+def is_dubious_ownership(text):
+    """True if git refused a command because of the safe.directory check."""
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(marker in lowered for marker in _DUBIOUS_OWNERSHIP_MARKERS)
+
+
+def _owner_from_stderr(stderr):
+    """Extract the owner git named in its refusal, or "" if it didn't say.
+
+    Git prints the owner on the line after ``is owned by:``, quoted and
+    tab-indented. The POSIX build says "is owned by someone else" instead and
+    names nobody.
+    """
+    lines = (stderr or "").splitlines()
+    for i, line in enumerate(lines):
+        if line.rstrip().endswith("is owned by:"):
+            for follow in lines[i + 1:]:
+                owner = follow.strip().strip("'\"")
+                if owner:
+                    return owner
+            break
+    return ""
+
+
+def describe_dubious_ownership(path, stderr=""):
+    """Explain -- actionably -- why git won't touch the repo at *path*.
+
+    Replaces git's five-line fatal with the two fixes that actually apply:
+    correct the owner (preferred -- keeps the safe.directory check meaningful)
+    or add a permanent exception.
+    """
+    owner = _owner_from_stderr(stderr)
+    owner_note = ""
+    if owner:
+        friendly = _KNOWN_SIDS.get(owner)
+        owner_note = f" (owner {owner}{' = ' + friendly if friendly else ''})"
+    safe_path = str(path).replace("\\", "/")
+    return "\n".join([
+        f"Git refuses to use this folder: its owner isn't your user "
+        f"account{owner_note}.",
+        "A folder created by an elevated process gets this owner, and every git",
+        "command inside it then fails -- so Init appears to do nothing.",
+        "Fix the owner (preferred):",
+        f'  icacls "{path}" /setowner "%USERDOMAIN%\\%USERNAME%"',
+        "or trust it as-is:",
+        f"  git config --global --add safe.directory {safe_path}",
+    ])
+
+
+def verify_repo_usable(cwd):
+    """Return ``(ok, detail)``: can git actually operate inside *cwd*?
+
+    ``git init`` succeeds in places git will subsequently refuse to read, so a
+    zero exit from init is not proof of a working repo -- callers must verify
+    and surface *detail* rather than let the folder silently revert to
+    "not a git repo".
+    """
+    rc, stdout, stderr = run_git(["rev-parse", "--show-toplevel"], cwd=cwd)
+    if rc == 0:
+        return True, ""
+    if is_dubious_ownership(stderr):
+        return False, describe_dubious_ownership(cwd, stderr)
+    first = next((ln.strip() for ln in (stderr or stdout).splitlines() if ln.strip()),
+                 "")
+    return False, first or "git could not read the repository"
+
+
 def _unquote_path(p):
     """Strip the quotes git adds around paths containing spaces/specials."""
     if len(p) >= 2 and p.startswith('"') and p.endswith('"'):
