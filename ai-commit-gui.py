@@ -341,6 +341,11 @@ COL_YELLOW = (220, 180, 60)
 COL_DIM = (120, 120, 130)
 COL_WHITE = (220, 220, 225)
 
+# Height of an empty commit-message box: one text line (~15px) + FramePadding.
+# Keeps unstarted repos compact in a long list; the box grows to fit the message
+# once Generate fills it (see _height_for_text).
+EMPTY_INPUT_HEIGHT = 26
+
 _SETTINGS_FILE = Path(__file__).resolve().parent / "ai-commit-gui-settings.json"
 _LOCK_FILE = Path(tempfile.gettempdir()) / ".ai-commit-gui.lock"
 _ICON_FILE = Path(__file__).resolve().parent / "ai-commit-icon.ico"
@@ -1513,8 +1518,7 @@ def cb_generate(sender, app_data, user_data):
     rs.gen_status = GenStatus.GENERATING
     rs.error_message = ""
     rs.commit_message = ""
-    if rs.input_tag and dpg.does_item_exist(rs.input_tag):
-        dpg.set_value(rs.input_tag, "")
+    clear_commit_input(rs)
     update_repo_status(rs)
     # Mirror the single-repo Refresh path (_ctx_refresh_repo): the status
     # refresh below rebuilds the repo list, which would otherwise re-collapse
@@ -2447,7 +2451,7 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
     if rs.entries:
         dpg.add_spacer(height=2, parent=rs.header_tag)
         display_text = _wrap_for_display(rs.commit_message) if rs.commit_message else ""
-        input_h = _height_for_text(display_text) if display_text else 60
+        input_h = _height_for_text(display_text)
         rs.input_tag = dpg.add_input_text(
             default_value=display_text,
             hint="Commit message...",
@@ -3042,10 +3046,17 @@ def _wrap_for_display(text):
 def _height_for_text(text):
     """Return pixel height that fits *text* with no extra blank space."""
     if not text:
-        return 60
+        return EMPTY_INPUT_HEIGHT
     num_lines = text.count("\n") + 1
     # ~15px per line + frame padding
     return max(60, min(400, num_lines * 15 + 8))
+
+
+def clear_commit_input(rs):
+    """Blank a repo's commit-message box and shrink it back to one line."""
+    if rs.input_tag and dpg.does_item_exist(rs.input_tag):
+        dpg.set_value(rs.input_tag, "")
+        dpg.configure_item(rs.input_tag, height=EMPTY_INPUT_HEIGHT)
 
 
 def _non_git_for_rebuild():
@@ -3290,8 +3301,7 @@ def process_queue():
             elif committed and pushed:
                 rs.gen_status = GenStatus.IDLE
                 rs.commit_message = ""
-                if rs.input_tag and dpg.does_item_exist(rs.input_tag):
-                    dpg.set_value(rs.input_tag, "")
+                clear_commit_input(rs)
                 dpg.set_value(rs.status_tag, "Committed & pushed!")
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
                 # Fully synced now -- let the upcoming partial rebuild re-apply
@@ -3304,8 +3314,7 @@ def process_queue():
             elif committed and not pushed and detail == "LOCAL_ONLY":
                 rs.gen_status = GenStatus.IDLE
                 rs.commit_message = ""
-                if rs.input_tag and dpg.does_item_exist(rs.input_tag):
-                    dpg.set_value(rs.input_tag, "")
+                clear_commit_input(rs)
                 dpg.set_value(rs.status_tag, "Committed!")
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
                 app.collapse_on_next_build.add(repo_name)
@@ -3314,16 +3323,14 @@ def process_queue():
                 branch = detail.split(":", 1)[1]
                 rs.gen_status = GenStatus.IDLE
                 rs.commit_message = ""
-                if rs.input_tag and dpg.does_item_exist(rs.input_tag):
-                    dpg.set_value(rs.input_tag, "")
+                clear_commit_input(rs)
                 dpg.set_value(rs.status_tag, f"No upstream for {branch} -- set up tracking?")
                 dpg.configure_item(rs.status_tag, color=COL_YELLOW)
                 _show_upstream_prompt(repo_name, branch)
             elif committed and not pushed:
                 rs.gen_status = GenStatus.ERROR
                 rs.commit_message = ""
-                if rs.input_tag and dpg.does_item_exist(rs.input_tag):
-                    dpg.set_value(rs.input_tag, "")
+                clear_commit_input(rs)
                 rs.error_message = detail
                 update_repo_status(rs)
                 # GitLab secret push protection block -- the commit landed, so
@@ -3456,8 +3463,7 @@ def process_queue():
                 rs.gen_status = GenStatus.GENERATING
                 rs.error_message = ""
                 rs.commit_message = ""
-                if rs.input_tag and dpg.does_item_exist(rs.input_tag):
-                    dpg.set_value(rs.input_tag, "")
+                clear_commit_input(rs)
                 update_repo_status(rs)
                 executor.submit(bg_generate_message, repo_name)
             elif rs:
