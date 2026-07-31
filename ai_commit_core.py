@@ -687,36 +687,141 @@ def get_branch_classification(cwd):
     return result
 
 
+def parse_incoming_log(text):
+    """Parse `git log --format=%h%x00%s` output into commit dicts.
+
+    NUL-delimited rather than `--oneline` so a subject can contain anything at
+    all (leading spaces, tabs) without confusing the split.
+    Returns [{"sha": ..., "subject": ...}] in git's order (newest first).
+    """
+    commits = []
+    for line in text.splitlines():
+        if not line.strip("\0").strip():
+            continue
+        sha, _, subject = line.partition("\0")
+        sha = sha.strip()
+        if not sha:
+            continue
+        commits.append({"sha": sha, "subject": subject.strip()})
+    return commits
+
+
+def parse_numstat_z(text):
+    """Parse `git diff --numstat -z` output into file dicts.
+
+    The -z form is used instead of plain --numstat because an unquoted rename
+    is rendered as `a/{b => c}/d`, which is NOT a valid pathspec -- feeding it
+    back to `git diff -- <path>` fails. With -z a rename instead emits an
+    *empty* path field followed by two more NUL fields (old, new).
+
+    Record shapes (fields are NUL-separated):
+        added \t deleted \t path            -- ordinary change
+        -     \t -       \t path            -- binary file
+        added \t deleted \t <empty>, old, new  -- rename / copy
+
+    Returns [{"path", "added", "deleted", "binary"}]; for a rename `path` is
+    the NEW path (what a pull would leave on disk) and `old_path` is set.
+    """
+    fields = text.split("\0")
+    files = []
+    i = 0
+    while i < len(fields):
+        record = fields[i]
+        i += 1
+        if not record.strip():
+            continue
+        parts = record.split("\t")
+        if len(parts) < 3:
+            continue
+        added_s, deleted_s, path = parts[0], parts[1], "\t".join(parts[2:])
+        binary = (added_s == "-" or deleted_s == "-")
+        added = 0 if binary else _safe_int(added_s)
+        deleted = 0 if binary else _safe_int(deleted_s)
+        old_path = ""
+        if not path:
+            # Rename/copy: the next two fields are the old and new paths.
+            # git always terminates every field with NUL, so a trailing empty
+            # element is normal -- validate the resolved path rather than
+            # trusting the field count.
+            old_path = fields[i] if i < len(fields) else ""
+            path = fields[i + 1] if i + 1 < len(fields) else ""
+            i += 2
+            if not path:
+                continue
+        files.append({
+            "path": path,
+            "old_path": old_path,
+            "added": added,
+            "deleted": deleted,
+            "binary": binary,
+        })
+    return files
+
+
+def _safe_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def get_incoming_changes(cwd):
-    """Return a summary of commits that a pull would bring in.
+    """Describe what a pull would bring in, in a form the UI can make clickable.
 
     Assumes fetch has already been done (get_sync_status does this).
-    Returns (commits_text, diffstat_text) where each is a string.
-    commits_text has one line per incoming commit.
-    diffstat_text is the --stat output of the diff.
-    Returns ("", "") if there is nothing incoming or no upstream.
+    Returns (upstream, commits, files):
+        upstream -- e.g. "origin/main", or "" when the branch has no upstream
+        commits  -- [{"sha", "subject"}], newest first (see parse_incoming_log)
+        files    -- [{"path", "old_path", "added", "deleted", "binary"}]
+                    (see parse_numstat_z)
+    Returns ("", [], []) when there is no upstream or nothing incoming.
     """
     # Find upstream
     rc, upstream, _ = run_git(
         ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd=cwd
     )
     if rc != 0 or not upstream.strip():
-        return "", ""
+        return "", [], []
     upstream = upstream.strip()
 
     # Incoming commits: HEAD..upstream
     rc, commits_out, _ = run_git(
-        ["log", "--oneline", "--no-decorate", f"HEAD..{upstream}"], cwd=cwd
+        ["log", "--no-decorate", "--format=%h%x00%s", f"HEAD..{upstream}"],
+        cwd=cwd,
     )
-    commits_text = commits_out.strip() if rc == 0 else ""
+    commits = parse_incoming_log(commits_out) if rc == 0 else []
 
-    # Diffstat: what files would change
+    # Which files would change, and by how much
     rc, stat_out, _ = run_git(
-        ["diff", "--stat", f"HEAD...{upstream}"], cwd=cwd
+        ["diff", "--numstat", "-z", f"HEAD...{upstream}"], cwd=cwd
     )
-    diffstat_text = stat_out.strip() if rc == 0 else ""
+    files = parse_numstat_z(stat_out) if rc == 0 else []
 
-    return commits_text, diffstat_text
+    return upstream, commits, files
+
+
+def get_commit_patch(cwd, sha):
+    """Return (ok, patch_text) for a single commit.
+
+    Plain `git show` on a *merge* commit prints the log message and no patch at
+    all, so --first-parent is used to diff against the first parent. If that
+    still yields no patch body (older git), fall back to an explicit range.
+    """
+    rc, out, err = run_git(
+        ["show", "--first-parent", "--patch", "--stat", sha], cwd=cwd
+    )
+    if rc != 0:
+        return False, err.strip() or f"git show {sha} failed"
+    if not _has_patch_body(out):
+        rc2, out2, _ = run_git(["diff", f"{sha}^1..{sha}"], cwd=cwd)
+        if rc2 == 0 and out2.strip():
+            return True, out.rstrip() + "\n\n" + out2
+    return True, out
+
+
+def _has_patch_body(text):
+    """True if `git show` output actually contains a diff, not just a message."""
+    return any(line.startswith("diff --git") for line in text.splitlines())
 
 
 def do_pull(cwd):

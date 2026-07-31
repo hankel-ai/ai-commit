@@ -90,6 +90,7 @@ from ai_commit_core import (
     get_active_github_account,
     get_branch_classification,
     get_current_branch,
+    get_commit_patch,
     get_diff,
     get_github_account,
     get_head_sha,
@@ -887,10 +888,10 @@ def bg_preview_pull(repo_name):
     if not rs:
         return
     try:
-        commits, diffstat = get_incoming_changes(rs.path)
-        ui_queue.put(("preview_pull_result", repo_name, commits, diffstat))
+        upstream, commits, files = get_incoming_changes(rs.path)
+        ui_queue.put(("preview_pull_result", repo_name, upstream, commits, files))
     except Exception as exc:
-        ui_queue.put(("preview_pull_result", repo_name, "", str(exc)))
+        ui_queue.put(("preview_pull_error", repo_name, str(exc)))
 
 
 def _launch_activity_viewer():
@@ -1815,17 +1816,13 @@ def cb_view_diff(sender, app_data, user_data):
     executor.submit(bg_launch_diff_viewer, repo_path, filepath)
 
 
-def bg_launch_diff_viewer(repo_path, filepath):
-    """Get the diff and launch a separate viewer window as a subprocess."""
-    rc, stdout, _ = run_git(["diff", "HEAD", "--", filepath], cwd=repo_path)
-    if rc != 0 or not stdout.strip():
-        rc2, stdout2, _ = run_git(["diff", "--cached", "--", filepath], cwd=repo_path)
-        if rc2 == 0 and stdout2.strip():
-            stdout = stdout2
-        elif not stdout.strip():
-            stdout = (describe_empty_diff(repo_path, only_path=filepath)
-                      or "(no diff available)")
-    data = {"filepath": filepath, "diff": stdout}
+def _spawn_diff_viewer(title, diff_text):
+    """Hand a diff to diff_viewer.py running as its own OS window.
+
+    Shared by the three things that can produce a diff: a locally modified
+    file, an incoming commit, and an incoming file (both from Preview Pull).
+    """
+    data = {"filepath": title, "title": title, "diff": diff_text}
     tmp = tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False,
         dir=tempfile.gettempdir(), encoding="utf-8",
@@ -1841,6 +1838,43 @@ def bg_launch_diff_viewer(repo_path, filepath):
     subprocess.Popen([exe, viewer, tmp.name])
 
 
+def bg_launch_diff_viewer(repo_path, filepath):
+    """Get the diff and launch a separate viewer window as a subprocess."""
+    rc, stdout, _ = run_git(["diff", "HEAD", "--", filepath], cwd=repo_path)
+    if rc != 0 or not stdout.strip():
+        rc2, stdout2, _ = run_git(["diff", "--cached", "--", filepath], cwd=repo_path)
+        if rc2 == 0 and stdout2.strip():
+            stdout = stdout2
+        elif not stdout.strip():
+            stdout = (describe_empty_diff(repo_path, only_path=filepath)
+                      or "(no diff available)")
+    _spawn_diff_viewer(filepath, stdout)
+
+
+def bg_launch_commit_diff(repo_path, sha, subject):
+    """Show the patch a single incoming commit introduces."""
+    ok, patch = get_commit_patch(repo_path, sha)
+    if not ok:
+        patch = f"(could not read commit {sha})\n\n{patch}"
+    elif not patch.strip():
+        patch = f"(commit {sha} has no changes)"
+    title = f"{sha} {subject}".strip()
+    _spawn_diff_viewer(title, patch)
+
+
+def bg_launch_incoming_file_diff(repo_path, upstream, filepath):
+    """Show the net incoming change to one file across all incoming commits."""
+    rc, stdout, stderr = run_git(
+        ["diff", f"HEAD...{upstream}", "--", filepath], cwd=repo_path
+    )
+    if rc != 0:
+        stdout = f"(git diff failed)\n\n{stderr.strip()}"
+    elif not stdout.strip():
+        # Binary files produce no textual patch.
+        stdout = f"(no textual diff for {filepath} -- likely a binary file)"
+    _spawn_diff_viewer(f"{filepath} (incoming)", stdout)
+
+
 def cb_preview_pull(sender, app_data, user_data):
     """Fetch and preview incoming changes before pulling."""
     repo_key = user_data
@@ -1850,6 +1884,18 @@ def cb_preview_pull(sender, app_data, user_data):
     dpg.set_value(rs.status_tag, "Fetching preview...")
     dpg.configure_item(rs.status_tag, color=COL_YELLOW)
     executor.submit(bg_preview_pull, repo_key)
+
+
+def cb_view_commit_diff(sender, app_data, user_data):
+    """View Diff on an incoming commit row in the Preview Pull window."""
+    repo_path, sha, subject = user_data
+    executor.submit(bg_launch_commit_diff, repo_path, sha, subject)
+
+
+def cb_view_incoming_file_diff(sender, app_data, user_data):
+    """View Diff on an incoming file row in the Preview Pull window."""
+    repo_path, upstream, filepath = user_data
+    executor.submit(bg_launch_incoming_file_diff, repo_path, upstream, filepath)
 
 
 def cb_confirm_pull(sender, app_data, user_data):
@@ -3493,11 +3539,18 @@ def process_queue():
                 _show_create_remote_popup(
                     repo_key, accounts, active_account, click_pos)
 
-        elif kind == "preview_pull_result":
-            _, repo_name, commits, diffstat = msg
+        elif kind == "preview_pull_error":
+            _, repo_name, detail = msg
             rs = app.repos.get(repo_name)
             if rs:
-                if not commits and not diffstat:
+                dpg.set_value(rs.status_tag, f"Preview failed: {detail}")
+                dpg.configure_item(rs.status_tag, color=COL_RED)
+
+        elif kind == "preview_pull_result":
+            _, repo_name, upstream, commits, files = msg
+            rs = app.repos.get(repo_name)
+            if rs:
+                if not commits and not files:
                     dpg.set_value(rs.status_tag, "No incoming changes found")
                     dpg.configure_item(rs.status_tag, color=COL_DIM)
                 else:
@@ -3509,27 +3562,61 @@ def process_queue():
                     with dpg.window(
                         label=f"Incoming changes - {rs.name}",
                         tag=win_tag,
-                        width=620, height=420,
+                        width=720, height=520,
                         no_collapse=True,
                         on_close=lambda s, a, u: (
                             dpg.delete_item(s) if dpg.does_item_exist(s) else None
                         ),
                     ):
                         if commits:
-                            dpg.add_text("Commits:", color=COL_ACCENT)
-                            dpg.add_input_text(
-                                default_value=commits,
-                                multiline=True, readonly=True,
-                                width=-1, height=140,
-                            )
+                            dpg.add_text(f"Commits ({len(commits)}):",
+                                         color=COL_ACCENT)
+                            # Scrollable so a long list can't push Pull Now
+                            # off the bottom of the window.
+                            with dpg.child_window(autosize_x=True, height=170,
+                                                  border=False):
+                                for c in commits:
+                                    with dpg.group(horizontal=True):
+                                        dpg.add_text(f"  {c['sha']:<10}",
+                                                     color=COL_DIM)
+                                        btn = dpg.add_button(
+                                            label="View Diff",
+                                            callback=cb_view_commit_diff,
+                                            user_data=(repo_key, c["sha"],
+                                                       c["subject"]),
+                                        )
+                                        dpg.bind_item_theme(btn, link_btn_theme)
+                                        dpg.add_text(c["subject"])
                             dpg.add_spacer(height=6)
-                        if diffstat:
-                            dpg.add_text("Files changed:", color=COL_ACCENT)
-                            dpg.add_input_text(
-                                default_value=diffstat,
-                                multiline=True, readonly=True,
-                                width=-1, height=140,
-                            )
+                        if files:
+                            dpg.add_text(f"Files changed ({len(files)}):",
+                                         color=COL_ACCENT)
+                            with dpg.child_window(autosize_x=True, height=170,
+                                                  border=False):
+                                for f in files:
+                                    with dpg.group(horizontal=True):
+                                        # Always two widgets of the same width
+                                        # so every row's button lines up.
+                                        if f["binary"]:
+                                            dpg.add_text(f"  {'bin':<5}",
+                                                         color=COL_DIM)
+                                            dpg.add_text(" " * 5, color=COL_DIM)
+                                        else:
+                                            dpg.add_text(f"  +{f['added']:<4}",
+                                                         color=COL_GREEN)
+                                            dpg.add_text(f"-{f['deleted']:<4}",
+                                                         color=COL_RED)
+                                        btn = dpg.add_button(
+                                            label="View Diff",
+                                            callback=cb_view_incoming_file_diff,
+                                            user_data=(repo_key, upstream,
+                                                       f["path"]),
+                                        )
+                                        dpg.bind_item_theme(btn, link_btn_theme)
+                                        label = f["path"]
+                                        if f["old_path"]:
+                                            label = f"{f['old_path']} -> {label}"
+                                        dpg.add_text(label)
                             dpg.add_spacer(height=6)
                         with dpg.group(horizontal=True):
                             pull_btn = dpg.add_button(

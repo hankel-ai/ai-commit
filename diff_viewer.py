@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Standalone diff viewer -- runs as a separate OS window.
 
-Launched by ai-commit-gui when the user clicks "View Diff" on a modified file.
-Reads diff data from a temp JSON file passed as the first CLI argument.
+Launched by ai-commit-gui when the user clicks "View Diff" on a locally
+modified file, or on an incoming commit / incoming file in the Preview Pull
+window. Reads diff data from a temp JSON file passed as the first CLI
+argument: {"title": <header text>, "diff": <patch>}. "filepath" is accepted as
+a fallback for "title" so an older payload shape still renders.
 """
 
 import json
@@ -24,6 +27,11 @@ COL_DIFF_DEL = (220, 80, 80)
 COL_DIFF_HDR = (100, 140, 230)
 COL_DIFF_RANGE = (180, 140, 220)
 
+# Every line becomes its own dpg.add_text widget, so a huge patch would hang
+# the window on build. A local file diff is small; a whole commit's patch (a
+# lockfile, a squash merge) is not.
+MAX_LINES = 4000
+
 
 def main():
     if len(sys.argv) < 2:
@@ -39,7 +47,7 @@ def main():
         except OSError:
             pass
 
-    filepath = data["filepath"]
+    title_text = data.get("title") or data.get("filepath") or "(diff)"
     diff_text = data["diff"]
 
     dpg.create_context()
@@ -61,7 +69,7 @@ def main():
             dpg.add_theme_style(dpg.mvStyleVar_ScrollbarSize, 10)
     dpg.bind_theme(theme)
 
-    title = f"Diff - {filepath}"
+    title = f"Diff - {title_text}"
     vp_kwargs = dict(
         title=title, width=900, height=700,
         min_width=400, min_height=300,
@@ -74,11 +82,14 @@ def main():
 
     with dpg.window(tag="primary", no_title_bar=True, no_resize=False,
                     no_move=True, no_close=True):
-        dpg.add_text(filepath, color=COL_ACCENT)
+        dpg.add_text(title_text, color=COL_ACCENT)
         dpg.add_separator()
 
+        lines = diff_text.splitlines()
+        truncated = len(lines) - MAX_LINES
+
         with dpg.child_window(autosize_x=True, height=-35, border=False):
-            for line in diff_text.splitlines():
+            for line in lines[:MAX_LINES]:
                 if line.startswith("+++") or line.startswith("---"):
                     dpg.add_text(line, color=COL_DIFF_HDR)
                 elif line.startswith("@@"):
@@ -91,6 +102,13 @@ def main():
                     dpg.add_text(line, color=COL_DIFF_HDR)
                 else:
                     dpg.add_text(line, color=COL_DIM)
+            if truncated > 0:
+                dpg.add_separator()
+                dpg.add_text(
+                    f"... truncated at {MAX_LINES} lines "
+                    f"({len(lines)} total, {truncated} not shown)",
+                    color=COL_RED,
+                )
 
         dpg.add_separator()
         dpg.add_button(label="Close", callback=lambda: dpg.stop_dearpygui())
