@@ -31,27 +31,80 @@ def check(name, cond):
 
 # --- parse_incoming_log -----------------------------------------------------
 
+DATE_A = "2026-07-29 08:36:00 -0400"
+DATE_B = "2026-07-28 14:02:11 -0400"
+
+
 def test_log_basic():
-    out = "a1b2c3d\0fix(helm): bump chart version\ne4f5g6h\0feat: add probes\n"
+    out = (f"a1b2c3d\0{DATE_A}\0fix(helm): bump chart version\n"
+           f"e4f5g6h\0{DATE_B}\0feat: add probes\n")
     commits = core.parse_incoming_log(out)
     check("log_count", len(commits) == 2)
     check("log_sha", commits[0]["sha"] == "a1b2c3d")
     check("log_subject", commits[0]["subject"] == "fix(helm): bump chart version")
     check("log_order_newest_first", commits[1]["sha"] == "e4f5g6h")
+    check("log_has_date", bool(commits[0]["date"]))
+    check("log_has_ts", commits[0]["ts"] > 0)
+    # Newest first => the first entry is the later instant.
+    check("log_ts_ordering", commits[0]["ts"] > commits[1]["ts"])
+
+
+def test_log_date_matches_parse_commit_date():
+    # The row must render the same string the repo header uses, so the date
+    # goes through parse_commit_date rather than being formatted separately.
+    expected_date, expected_ts = core.parse_commit_date(DATE_A)
+    commits = core.parse_incoming_log(f"a1b2c3d\0{DATE_A}\0subj\n")
+    check("log_date_str", commits[0]["date"] == expected_date)
+    check("log_date_ts", commits[0]["ts"] == expected_ts)
+
+
+def test_log_date_honours_committer_offset():
+    # Same instant written in two zones must yield the SAME epoch -- a CI
+    # runner on UTC must not read as hours in the future. (Assertions are
+    # timezone-independent: they compare the two against each other.)
+    # NOTE: \x00 not \0 here -- "\0" followed by a digit is an OCTAL escape in
+    # Python ("\02026..." == chr(16) + "26..."), which silently eats the field.
+    utc = core.parse_incoming_log("aaa1111\x002026-07-29 12:36:00 +0000\x00ci build\n")
+    ist = core.parse_incoming_log("bbb2222\x002026-07-29 18:06:00 +0530\x00colleague\n")
+    check("log_tz_same_instant", utc[0]["ts"] == ist[0]["ts"])
+    check("log_tz_same_display", utc[0]["date"] == ist[0]["date"])
+
+
+def test_log_unparseable_date_degrades():
+    commits = core.parse_incoming_log("abc1234\0not a date\0subj\n")
+    check("log_bad_date_no_crash", len(commits) == 1)
+    check("log_bad_date_ts_zero", commits[0]["ts"] == 0.0)
+    check("log_bad_date_subject_intact", commits[0]["subject"] == "subj")
+
+
+def test_log_missing_date_field():
+    # Defensive: a 2-field line (no date) must not swallow the subject.
+    commits = core.parse_incoming_log("abc1234\0only two fields\n")
+    check("log_two_field_count", len(commits) == 1)
+    check("log_two_field_ts", commits[0]["ts"] == 0.0)
 
 
 def test_log_subject_with_odd_whitespace():
     # A subject containing a tab or leading spaces must survive intact -- this
-    # is why the format is NUL-delimited rather than --oneline.
-    out = "abc1234\0fix:\tuse  spaced   words\n"
+    # is why the format is NUL-delimited rather than --oneline, and why the
+    # subject comes last with the split capped at 2.
+    out = f"abc1234\0{DATE_A}\0fix:\tuse  spaced   words\n"
     commits = core.parse_incoming_log(out)
     check("log_tab_subject", commits[0]["subject"] == "fix:\tuse  spaced   words")
 
 
+def test_log_subject_containing_nul_safe_split():
+    # maxsplit=2 means anything after the second NUL is the subject verbatim.
+    out = f"abc1234\0{DATE_A}\0subject with \0 odd byte\n"
+    commits = core.parse_incoming_log(out)
+    check("log_maxsplit_subject", commits[0]["subject"] == "subject with \0 odd byte")
+
+
 def test_log_empty_subject():
-    commits = core.parse_incoming_log("abc1234\0\n")
+    commits = core.parse_incoming_log(f"abc1234\0{DATE_A}\0\n")
     check("log_empty_subject_kept", len(commits) == 1)
     check("log_empty_subject_value", commits[0]["subject"] == "")
+    check("log_empty_subject_date", bool(commits[0]["date"]))
 
 
 def test_log_empty_and_blank():
@@ -60,7 +113,7 @@ def test_log_empty_and_blank():
 
 
 def test_log_no_trailing_newline():
-    commits = core.parse_incoming_log("abc1234\0only commit")
+    commits = core.parse_incoming_log(f"abc1234\0{DATE_A}\0only commit")
     check("log_no_trailing_nl", len(commits) == 1 and commits[0]["sha"] == "abc1234")
 
 
@@ -165,7 +218,7 @@ def test_incoming_empty_upstream_string():
 def test_incoming_happy_path():
     stub = _GitStub({
         "rev-parse": (0, "origin/main\n", ""),
-        "log": (0, "a1b2c3d\0fix: one\ne4f5g6h\0feat: two\n", ""),
+        "log": (0, f"a1b2c3d\0{DATE_A}\0fix: one\ne4f5g6h\0{DATE_B}\0feat: two\n", ""),
         "diff": (0, "2\t1\tChart.yaml\0-\t-\tlogo.png\0", ""),
     })
     upstream, commits, files = _with_stub(
@@ -173,8 +226,13 @@ def test_incoming_happy_path():
     check("happy_upstream", upstream == "origin/main")
     check("happy_commits", len(commits) == 2)
     check("happy_commit_subject", commits[0]["subject"] == "fix: one")
+    check("happy_commit_date", bool(commits[0]["date"]))
     check("happy_files", len(files) == 2)
     check("happy_binary", files[1]["binary"] is True)
+    # The log format must actually request the date, or every row renders blank.
+    log_call = [c for c in stub.calls if "log" in c][0]
+    check("happy_log_requests_date",
+          any("%ci" in a for a in log_call))
 
 
 def test_incoming_log_failure_keeps_files():

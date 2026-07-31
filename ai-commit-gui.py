@@ -3579,6 +3579,10 @@ def process_queue():
                                     with dpg.group(horizontal=True):
                                         dpg.add_text(f"  {c['sha']:<10}",
                                                      color=COL_DIM)
+                                        # Local wall-clock time, same format as
+                                        # the repo header's [Jul 29 08:36am].
+                                        dpg.add_text(f"{c['date']:<15}",
+                                                     color=COL_DIM)
                                         btn = dpg.add_button(
                                             label="View Diff",
                                             callback=cb_view_commit_diff,

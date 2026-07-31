@@ -688,21 +688,36 @@ def get_branch_classification(cwd):
 
 
 def parse_incoming_log(text):
-    """Parse `git log --format=%h%x00%s` output into commit dicts.
+    """Parse `git log --format=%h%x00%ci%x00%s` output into commit dicts.
 
     NUL-delimited rather than `--oneline` so a subject can contain anything at
-    all (leading spaces, tabs) without confusing the split.
-    Returns [{"sha": ..., "subject": ...}] in git's order (newest first).
+    all (leading spaces, tabs) without confusing the split. The subject comes
+    last and the split is capped at 2, so it is taken verbatim to end of line.
+
+    The date runs through :func:`parse_commit_date`, so a commit authored by a
+    CI runner on UTC or a colleague in another zone reads as the local
+    wall-clock time it happened at rather than a stamp in the future.
+
+    Returns [{"sha", "subject", "date", "ts"}] in git's order (newest first),
+    where `date` is the display string and `ts` the absolute epoch.
     """
     commits = []
     for line in text.splitlines():
         if not line.strip("\0").strip():
             continue
-        sha, _, subject = line.partition("\0")
-        sha = sha.strip()
+        parts = line.split("\0", 2)
+        sha = parts[0].strip()
         if not sha:
             continue
-        commits.append({"sha": sha, "subject": subject.strip()})
+        raw_date = parts[1] if len(parts) > 1 else ""
+        subject = parts[2] if len(parts) > 2 else ""
+        short_date, commit_ts = parse_commit_date(raw_date)
+        commits.append({
+            "sha": sha,
+            "subject": subject.strip(),
+            "date": short_date,
+            "ts": commit_ts,
+        })
     return commits
 
 
@@ -771,7 +786,8 @@ def get_incoming_changes(cwd):
     Assumes fetch has already been done (get_sync_status does this).
     Returns (upstream, commits, files):
         upstream -- e.g. "origin/main", or "" when the branch has no upstream
-        commits  -- [{"sha", "subject"}], newest first (see parse_incoming_log)
+        commits  -- [{"sha", "subject", "date", "ts"}], newest first
+                    (see parse_incoming_log)
         files    -- [{"path", "old_path", "added", "deleted", "binary"}]
                     (see parse_numstat_z)
     Returns ("", [], []) when there is no upstream or nothing incoming.
@@ -786,7 +802,7 @@ def get_incoming_changes(cwd):
 
     # Incoming commits: HEAD..upstream
     rc, commits_out, _ = run_git(
-        ["log", "--no-decorate", "--format=%h%x00%s", f"HEAD..{upstream}"],
+        ["log", "--no-decorate", "--format=%h%x00%ci%x00%s", f"HEAD..{upstream}"],
         cwd=cwd,
     )
     commits = parse_incoming_log(commits_out) if rc == 0 else []
