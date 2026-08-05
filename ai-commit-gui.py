@@ -85,6 +85,8 @@ from ai_commit_core import (
     describe_empty_diff,
     do_pull,
     is_secret_push_block,
+    needs_upstream_setup,
+    parse_upstream_mismatch,
     should_offer_push,
     SECRET_PUSH_SKIP_OPTION,
     generate_message,
@@ -1688,10 +1690,16 @@ def _cb_confirm_create_remote(sender, app_data, user_data):
     executor.submit(bg_create_remote, repo_key, account, visibility)
 
 
-def _show_upstream_prompt(repo_name, branch):
-    """Show a popup asking the user to push with --set-upstream."""
+def _show_upstream_prompt(repo_name, branch, current_upstream=""):
+    """Show a popup asking the user to push with --set-upstream.
+
+    *current_upstream* is set when the branch DOES track a remote branch but
+    under a different name (push.default=simple refuses that push). Saying
+    "no remote tracking branch" there would be a lie, and repointing the
+    tracking ref is a real change the user should see before confirming.
+    """
     win_tag = dpg.generate_uuid()
-    pop_w, pop_h = 440, 130
+    pop_w, pop_h = 480, 150 if current_upstream else 130
     click_pos = dpg.get_mouse_pos()
     px = max(0, int(click_pos[0]) - pop_w // 2)
     py = max(0, int(click_pos[1]))
@@ -1706,7 +1714,13 @@ def _show_upstream_prompt(repo_name, branch):
             dpg.delete_item(s) if dpg.does_item_exist(s) else None
         ),
     ):
-        dpg.add_text(f"Branch '{branch}' has no remote tracking branch.")
+        if current_upstream:
+            dpg.add_text(f"Branch '{branch}' tracks 'origin/{current_upstream}'"
+                         f" -- the names don't match.")
+            dpg.add_text(f"This pushes to origin/{branch} (creating it if"
+                         f" needed) and tracks that instead.", color=COL_DIM)
+        else:
+            dpg.add_text(f"Branch '{branch}' has no remote tracking branch.")
         dpg.add_text(f"Run: git push --set-upstream origin {branch}",
                      color=COL_DIM)
         dpg.add_spacer(height=6)
@@ -3413,13 +3427,16 @@ def process_queue():
                 app.collapse_on_next_build.add(repo_name)
                 executor.submit(bg_refresh_single_repo, repo_name)
             elif committed and not pushed and detail.startswith("NO_UPSTREAM:"):
-                branch = detail.split(":", 1)[1]
+                # NO_UPSTREAM:<branch>[:<differently-named upstream>]
+                parts = detail.split(":", 2)
+                branch = parts[1]
+                current_upstream = parts[2] if len(parts) > 2 else ""
                 rs.gen_status = GenStatus.IDLE
                 rs.commit_message = ""
                 clear_commit_input(rs)
                 dpg.set_value(rs.status_tag, f"No upstream for {branch} -- set up tracking?")
                 dpg.configure_item(rs.status_tag, color=COL_YELLOW)
-                _show_upstream_prompt(repo_name, branch)
+                _show_upstream_prompt(repo_name, branch, current_upstream)
             elif committed and not pushed:
                 rs.gen_status = GenStatus.ERROR
                 rs.commit_message = ""
@@ -3458,6 +3475,16 @@ def process_queue():
                 # --set-upstream since the branch still has no tracking ref.
                 if is_secret_push_block(detail):
                     _show_secret_push_prompt(repo_name, upstream_branch)
+                # A bare push (banner Push button, or an override retry) that
+                # git refused for want of a same-named remote branch: offer the
+                # same --set-upstream prompt the commit path offers, instead of
+                # a dead-end sticky error. `upstream_branch` non-empty means
+                # the failed push ALREADY carried --set-upstream, so re-prompting
+                # would just loop.
+                elif (not upstream_branch and needs_upstream_setup(detail)
+                      and rs.branch):
+                    _show_upstream_prompt(repo_name, rs.branch,
+                                          parse_upstream_mismatch(detail))
 
         elif kind == "workflow_check":
             _, repo_name, reason = msg

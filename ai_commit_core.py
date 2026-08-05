@@ -1197,6 +1197,47 @@ def is_secret_push_block(text):
             or "push blocked: secrets detected" in lowered)
 
 
+def needs_upstream_setup(text):
+    """True if a push failed only because the branch has no same-named
+    remote branch to push to -- the class of failure that
+    `git push --set-upstream origin <branch>` fixes.
+
+    Git words this two different ways and BOTH land here:
+
+      * no upstream at all -- "The current branch X has no upstream branch."
+      * an upstream whose name differs from the local branch, which
+        push.default=simple refuses -- "The upstream branch of your current
+        branch does not match the name of your current branch." (a branch
+        created off a differently-named remote branch, or with
+        branch.autoSetupMerge=always).
+
+    Whitespace is normalized first because git hard-wraps the second message
+    mid-sentence, so no phrase spanning the wrap is contiguous in the raw text.
+    """
+    if not text:
+        return False
+    flat = " ".join(text.lower().split())
+    return ("no upstream branch" in flat
+            or ("upstream branch of your current branch does not match "
+                "the name of your current branch") in flat)
+
+
+def parse_upstream_mismatch(text):
+    """Return the differently-named upstream git named in a push refusal.
+
+    Reads it out of git's own suggestion line, `git push origin HEAD:<name>`,
+    which only the name-mismatch refusal prints. Returns "" for the plain
+    no-upstream refusal (nothing is being tracked) and for anything else.
+    """
+    if not text:
+        return ""
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("git push origin HEAD:"):
+            return line.split("HEAD:", 1)[1].strip()
+    return ""
+
+
 def should_offer_push(ahead, behind, remote_url):
     """True if the UI should offer a bare `git push` for this repo.
 
@@ -1236,8 +1277,14 @@ def do_commit_and_push(cwd, message):
 
     rc, push_out, push_err = run_git(["push"], cwd=cwd)
     if rc != 0:
-        if "has no upstream branch" in push_err or "no upstream branch" in push_err:
+        if needs_upstream_setup(push_err):
             branch = get_current_branch(cwd)
+            # A mismatched upstream is appended so the prompt can say what the
+            # branch tracks today. ':' is illegal in a git ref name, so
+            # splitting this back apart stays unambiguous.
+            mismatch = parse_upstream_mismatch(push_err)
+            if mismatch:
+                return True, False, f"NO_UPSTREAM:{branch}:{mismatch}"
             return True, False, f"NO_UPSTREAM:{branch}"
         detail += f"\nPush failed: {push_err.strip()}"
         return True, False, detail
