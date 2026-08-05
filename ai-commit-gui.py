@@ -85,6 +85,7 @@ from ai_commit_core import (
     describe_empty_diff,
     do_pull,
     is_secret_push_block,
+    should_offer_push,
     SECRET_PUSH_SKIP_OPTION,
     generate_message,
     get_active_github_account,
@@ -1023,6 +1024,31 @@ def bg_push_set_upstream(repo_name, branch):
                       branch))
 
 
+def bg_push_only(repo_name):
+    """Push already-committed work -- no staging, no commit.
+
+    The retry path for a commit that landed while its push failed (transient
+    remote error, dropped connection) and for commits made outside the GUI.
+    Posts push_upstream_result: its success flow (status, collapse, refresh,
+    Actions viewer) and its failure flow (sticky error + secret-block prompt)
+    are both exactly right for a completed push. The branch is sent empty so a
+    secret-block override retries with a plain push -- this branch already has
+    an upstream, or the push would have failed NO_UPSTREAM instead.
+    """
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    activity_log.log_event(
+        "Push (retry existing commits)",
+        repo=repo_name, category=activity_log.CAT_GIT,
+    )
+    rc, out, err = run_git(["push"], cwd=str(rs.path))
+    if rc == 0:
+        ui_queue.put(("push_upstream_result", repo_name, True, out.strip()))
+    else:
+        ui_queue.put(("push_upstream_result", repo_name, False, err.strip(), ""))
+
+
 def bg_push_override(repo_name, branch=""):
     """Re-push, skipping GitLab secret push protection for this one push.
 
@@ -1886,6 +1912,18 @@ def cb_preview_pull(sender, app_data, user_data):
     executor.submit(bg_preview_pull, repo_key)
 
 
+def cb_push_now(sender, app_data, user_data):
+    """Push button on the PUSH REQUIRED banner -- retry an unpushed commit."""
+    repo_key = user_data
+    rs = app.repos.get(repo_key)
+    if not rs:
+        return
+    if rs.status_tag and dpg.does_item_exist(rs.status_tag):
+        dpg.set_value(rs.status_tag, "Pushing...")
+        dpg.configure_item(rs.status_tag, color=COL_YELLOW)
+    executor.submit(bg_push_only, repo_key)
+
+
 def cb_view_commit_diff(sender, app_data, user_data):
     """View Diff on an incoming commit row in the Preview Pull window."""
     repo_path, sha, subject = user_data
@@ -2416,6 +2454,15 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
                 dpg.add_text(f"  !! {sync_text} - PULL BEFORE EDITING !!", color=COL_RED)
                 pull_btn = dpg.add_button(label="Preview Pull", callback=cb_preview_pull, user_data=repo_key)
                 dpg.bind_item_theme(pull_btn, pull_btn_theme)
+        elif should_offer_push(rs.ahead, rs.behind, rs.remote_url):
+            # The banner carries the Push button because it renders above the
+            # `if rs.entries:` split below -- Commit & Push only exists for a
+            # dirty tree, so a commit whose push failed (clean tree, ahead > 0)
+            # would otherwise have no way to retry.
+            with dpg.group(horizontal=True, parent=rs.header_tag):
+                dpg.add_text(f"  !! {sync_text} - PUSH REQUIRED !!", color=COL_RED)
+                push_btn = dpg.add_button(label="Push", callback=cb_push_now, user_data=repo_key)
+                dpg.bind_item_theme(push_btn, green_btn_theme)
         else:
             dpg.add_text(f"  !! {sync_text} - PUSH REQUIRED !!", color=COL_RED, parent=rs.header_tag)
 

@@ -1197,6 +1197,21 @@ def is_secret_push_block(text):
             or "push blocked: secrets detected" in lowered)
 
 
+def should_offer_push(ahead, behind, remote_url):
+    """True if the UI should offer a bare `git push` for this repo.
+
+    Covers the case where a commit landed but its push did not -- a transient
+    server error, a dropped connection, or a commit made outside the GUI. The
+    tree is clean then, so the Commit & Push button (which only renders when
+    there are uncommitted changes) is absent and there is nothing else to
+    retry with.
+
+    False when *behind* is non-zero: a plain push would be rejected
+    non-fast-forward, and that banner offers Preview Pull instead.
+    """
+    return bool(remote_url) and int(ahead) > 0 and int(behind) == 0
+
+
 def do_commit_and_push(cwd, message):
     """Stage all changes, commit, and attempt to push.
 
