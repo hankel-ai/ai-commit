@@ -2,7 +2,9 @@
 
 Analysis + options for reducing the cost of ai-commit's per-cycle repo polling.
 **Option 1 is implemented** (see [Status](#status)); Options 2–5 are documented
-here for later reference.
+here for later reference. A separate axis — running the repos *concurrently*
+rather than one at a time — is covered in
+[Startup fan-out](#startup-fan-out-parallel-polling).
 
 ## The problem
 
@@ -150,10 +152,98 @@ keep the change minimal; revisit if idle CPU is still a concern.
   (`git remote`); a repo whose only remote isn't named `origin` would now show
   "local only". Negligible in practice.
 
+## Startup fan-out (parallel polling)
+
+Option 1 cut the *number* of git calls. This is the other axis: they were all
+still made **one at a time**. `trigger_poll` submits `bg_poll_repos` as a single
+task, and its per-repo loop was serial — so raising the module executor's
+`max_workers` did nothing whatsoever for poll speed. That is the first thing to
+know before trying to "add threads".
+
+### Where a launch actually went (50 repos, ~50 with a remote)
+
+From `%TEMP%/ai-commit-activity.jsonl`, which is cleared at every GUI start —
+so the head of the log *is* the startup poll:
+
+| Work | Calls | Total | Note |
+|------|------:|------:|------|
+| `git fetch --prune` | 51 | **30.6 s** | network; at startup every repo is "new", so all of them fetch |
+| `gh repo view` (visibility) | ~51 | **~22 s** | network; **invisible in the activity log** — `get_repo_visibility` uses `subprocess.run`, not `run_git` |
+| `git rev-parse --show-toplevel` | 71 | 3.8 s | `is_git_repo`, once per candidate folder |
+| `git status --porcelain --branch` | 53 | 3.4 s | |
+| `git log -1` | 52 | 3.1 s | |
+| `git remote get-url` | 51 | 2.8 s | |
+
+~68 s of a ~70 s launch was network I/O in ~102 strictly sequential subprocesses.
+
+### How much parallelism actually buys (A/B, 12 real repos, this machine)
+
+| Work | Serial | ×4 | ×8 | ×12 |
+|------|-------:|----:|----:|-----:|
+| `gh repo view` | 5.2 s | 1.7 s (3.1×) | 1.5 s (3.6×) | 1.7 s (3.1×) |
+| `git ls-remote` (stands in for fetch) | 7.8 s | 2.9 s (2.7×) | 2.4 s (3.2×) | 2.3 s (3.4×) |
+| `git status` | 0.5 s | 0.2 s (2.2×) | 0.4 s | 0.4 s |
+| `git log -1` | 0.7 s | 0.5 s | 0.5 s | 0.4 s |
+
+**Network calls plateau at ~3–3.5×, local git barely scales at all.** On Windows
+the limit is process creation (plus Defender inspecting each spawn), not
+bandwidth or the GIL. Past ~8 threads there is nothing left to win, which is why
+`POLL_FANOUT_MAX` is 16 only as headroom and the default is 8.
+
+### What was implemented
+
+- `bg_poll_repos` now runs in three passes: **discover** → **decide** →
+  **execute**. The first two are unchanged logic; the decision pass only
+  classifies each repo (pause / idle-tier / force rules exactly as before) and
+  appends the ones needing real work to a `live` list.
+- `_run_poll_batch(live, force)` runs that list on a **short-lived**
+  `ThreadPoolExecutor(min(app.poll_threads, len(live)))`, created and shut down
+  per cycle. Both poll paths (normal and the paused fast-path) go through it.
+- `_map_is_git_repo` does the same for discovery's `git rev-parse` probes.
+- A repo that raises now falls back to its cached result instead of taking the
+  cycle down — the old serial loop had no guard, so one unreadable repo meant
+  **no `poll_result` at all** and a UI stuck on `...`.
+- Visibility (`gh repo view`) is cached in the settings JSON
+  (`AppState.visibility_cache`, `repo_key -> "PUBLIC"/"PRIVATE"/""`), so it is
+  paid once per repo ever rather than once per launch. Membership, not
+  truthiness, is the hit test — a cached `""` (GitLab, no remote, gh missing)
+  must also stick. `repo_force` (manual Refresh / force-active) re-asks and
+  overwrites. Workers only mark it dirty; the `poll_result` handler persists it,
+  because `_save_settings` reads the viewport and is main-thread-only.
+
+**Do not fan out onto the module-level `executor`.** It has 4 workers and is
+already holding the `bg_poll_repos` task; two overlapping polls (the automatic
+cycle plus a manual Refresh) would each occupy a worker and then block on
+subtasks that can never be scheduled.
+
+### Measured result (real watched folders, 50 repos)
+
+| | Wall |
+|---|---:|
+| serial (`poll_threads=1`) | 59.2 s |
+| parallel ×8 | **17.3 s** (3.4×) |
+| parallel ×8, second launch (visibility cached) | **14.8 s** |
+
+Parity was verified by polling the same 50 repos serially and in parallel and
+comparing all 10 result fields per repo: **0 mismatches**.
+
+Note that once the fan-out is live, the activity log's summed `duration_ms`
+exceeds the wall-clock span — that overlap is how you confirm it is working.
+
+### Still on the table
+
+The remaining ~15 s is mostly `git fetch`. Skipping the startup fetch for
+idle-tier repos would remove most of it, but classifying a repo *before* its
+first poll needs `last_commit_ts` persisted across sessions — the same snapshot
+work as rendering the window instantly from the previous session's results.
+Both were deliberately deferred.
+
 ## Re-run the tests
 ```bash
 cd ai-commit
 python tests/test_status_branch.py
 python tests/test_poll_pause.py
+python tests/test_poll_parallel.py
+python tests/test_visibility_cache.py
 python tests/test_status.py
 ```

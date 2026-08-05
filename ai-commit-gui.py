@@ -12,7 +12,7 @@ import tempfile
 import textwrap
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum, auto
@@ -300,6 +300,7 @@ class AppState:
     watched_folders: list = field(default_factory=list)  # list of Path
     repos: dict = field(default_factory=dict)  # repo_key -> RepoState
     poll_interval: int = 30
+    poll_threads: int = 8  # concurrent repos per poll cycle (see _run_poll_batch)
     auto_generate: bool = False
     always_on_top: bool = False
     model: str = "qwen3-coder:480b-cloud"
@@ -315,6 +316,8 @@ class AppState:
     recent_days: int = 14  # a commit within this many days counts as "recent"
     idle_poll_interval: int = 900  # seconds between polls of idle-tier repos
     idle_last_poll: dict = field(default_factory=dict)  # repo_key -> last idle-poll epoch (transient)
+    visibility_cache: dict = field(default_factory=dict)  # repo_key -> "PUBLIC"/"PRIVATE"/"" (persisted; saves a `gh repo view` per repo per launch)
+    visibility_cache_dirty: bool = False  # a poll worker wrote to the cache -> main thread persists it
     last_results: dict = field(default_factory=dict)  # last poll_result payload (for no-poll re-render)
     last_non_git: dict = field(default_factory=dict)  # last non-git payload (for no-poll re-render)
     active_gh_account: str = ""
@@ -330,7 +333,15 @@ class AppState:
 
 app = AppState()
 ui_queue = queue.Queue()
+# Serves UI actions (generate, commit, pull, ...). The poll does NOT fan out
+# onto this pool -- see _run_poll_batch for why.
 executor = ThreadPoolExecutor(max_workers=4)
+
+# Upper bound for the "Poll threads" setting. Measured on Windows (63 repos):
+# the network calls (git fetch, gh repo view) top out around 3-3.5x at 4-8
+# threads and local git barely scales at all -- process creation, not
+# bandwidth, is the limit. Anything past ~8 is dead weight; 16 is just headroom.
+POLL_FANOUT_MAX = 16
 _hwnd = None  # Cached viewport HWND (Windows)
 _nswindow = None  # Cached NSWindow (macOS)
 _pending_topmost = None  # Deferred macOS topmost change (True/False/None)
@@ -380,6 +391,7 @@ def _save_settings():
             "auto_generate": app.auto_generate,
             "always_on_top": app.always_on_top,
             "poll_interval": app.poll_interval,
+            "poll_threads": app.poll_threads,
             "model": app.model,
             "provider": app.provider,
             "ollama_url": app.ollama_url,
@@ -391,6 +403,7 @@ def _save_settings():
             "recent_days": app.recent_days,
             "idle_poll_interval": app.idle_poll_interval,
             "repo_overrides": app.repo_overrides,
+            "visibility_cache": app.visibility_cache,
             "sort_by_date": app.sort_by_date,
         }
         _SETTINGS_FILE.write_text(json.dumps(data))
@@ -685,9 +698,39 @@ def _read_poll_status(rp, remote_url, do_fetch):
     return entries, info["branch"], info["ahead"], info["behind"], branch_status
 
 
+def _repo_visibility_cached(rp, repo_key, existing, repo_force, remote_url):
+    """PUBLIC/PRIVATE for a repo, hitting `gh repo view` as rarely as possible.
+
+    Precedence: this session's RepoState -> the persisted cache -> gh. The gh
+    call is ~440 ms of network, and at startup every repo is new, so without
+    the persisted layer a 51-remote launch spends ~22 s re-deriving a badge
+    that essentially never changes.
+
+    Membership -- not truthiness -- decides a cache hit, so a cached "" (a
+    non-GitHub remote such as GitLab, or gh not installed/authed) also counts
+    as answered and stops those repos re-paying the cost every launch. A
+    forced poll (manual Refresh / force-active repo) always re-asks and
+    overwrites, which is the escape hatch when a repo flips visibility or
+    gains a GitHub remote.
+    """
+    if not repo_force:
+        if existing and existing.visibility:
+            return existing.visibility
+        if repo_key in app.visibility_cache:
+            return app.visibility_cache[repo_key]
+    visibility = get_repo_visibility(rp) if remote_url else ""
+    if app.visibility_cache.get(repo_key, object()) != visibility:
+        app.visibility_cache[repo_key] = visibility
+        # Persisting touches the viewport, so it has to happen on the main
+        # thread -- the poll_result handler does it once per cycle.
+        app.visibility_cache_dirty = True
+    return visibility
+
+
 def _poll_one_repo(rp, existing, repo_force, force):
     """Run a live git poll for a single repo and return its result dict."""
-    ui_queue.put(("repo_loading", str(rp), rp.name))
+    repo_key = str(rp)
+    ui_queue.put(("repo_loading", repo_key, rp.name))
     last_msg, last_date, last_ts = get_last_commit(rp)
     is_new = existing is None
     if not repo_force and existing and existing.remote_url:
@@ -695,10 +738,8 @@ def _poll_one_repo(rp, existing, repo_force, force):
     else:
         remote_url = get_remote_url(rp)
     github_account = get_github_account(remote_url)
-    if not repo_force and existing and existing.visibility:
-        visibility = existing.visibility
-    else:
-        visibility = get_repo_visibility(rp) if remote_url else ""
+    visibility = _repo_visibility_cached(rp, repo_key, existing, repo_force,
+                                         remote_url)
     entries, branch, ahead, behind, branch_status = _read_poll_status(
         rp, remote_url, do_fetch=is_new or repo_force)
     return {
@@ -717,8 +758,83 @@ def _poll_one_repo(rp, existing, repo_force, force):
     }
 
 
+def _safe_is_git_repo(p):
+    """is_git_repo that reports "not a repo" instead of raising.
+
+    Runs on the discovery fan-out, where one unreadable folder must not take
+    the whole poll cycle down with it.
+    """
+    try:
+        return is_git_repo(p)
+    except Exception:
+        return False
+
+
+def _map_is_git_repo(paths):
+    """Probe several paths for repo-ness at once. Order is preserved.
+
+    Discovery is one `git rev-parse --show-toplevel` per candidate folder --
+    71 spawns / ~3.8 s on this machine before anything else can start.
+    """
+    if not paths:
+        return []
+    workers = max(1, min(app.poll_threads, len(paths)))
+    if workers == 1:
+        return [_safe_is_git_repo(p) for p in paths]
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return list(ex.map(_safe_is_git_repo, paths))
+
+
+def _run_poll_batch(live, force):
+    """Poll every (repo_key, path, existing, repo_force) in *live* at once.
+
+    A poll cycle is dominated by network I/O -- a `git fetch` and a
+    `gh repo view` per repo -- run one repo at a time. Fanning out cuts a
+    63-repo startup from ~70 s to ~12 s.
+
+    The pool is created and shut down per call, deliberately:
+
+    * It must NOT be the module-level `executor`. That pool has 4 workers and
+      is already holding this very task; two overlapping polls (the automatic
+      cycle plus a manual Refresh) would each occupy a worker and then block
+      on subtasks that can never be scheduled -- a deadlock.
+    * Nothing is left running between cycles, and the width picks up a changed
+      "Poll threads" setting on the next cycle with no restart.
+
+    A repo that raises falls back to its cached data rather than killing the
+    cycle: the old serial loop had no guard, so one unreadable repo meant no
+    poll_result at all and a UI stuck showing "...".
+    """
+    if not live:
+        return {}
+    workers = max(1, min(app.poll_threads, len(live)))
+    out = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {
+            ex.submit(_poll_one_repo, rp, existing, repo_force, force):
+                (repo_key, rp, existing)
+            for repo_key, rp, existing, repo_force in live
+        }
+        for fut in as_completed(futures):
+            repo_key, rp, existing = futures[fut]
+            try:
+                out[repo_key] = fut.result()
+            except Exception as exc:
+                activity_log.log_event(
+                    f"Poll failed: {exc}", repo=repo_key,
+                    category=activity_log.CAT_ERROR,
+                )
+                if existing is not None:
+                    out[repo_key] = _cached_repo_result(rp, existing)
+    return out
+
+
 def bg_poll_repos(force=False):
     """Discover repos and get status for each. Posts results to ui_queue.
+
+    Three passes: discover the repos, decide per repo whether it needs a live
+    poll (pause / idle-tier / force rules), then run all the live ones
+    concurrently via _run_poll_batch.
 
     When *force* is True, bypass cached remote_url and always run a
     network fetch -- same behavior as a fresh startup. Used by the manual
@@ -730,17 +846,22 @@ def bg_poll_repos(force=False):
     now = time.time()
     results = {}
     non_git_results = {}
+    # Repos needing a live poll this cycle, gathered across every watched
+    # folder so the fan-out below is as wide as possible.
+    live = []
 
     # While globally paused (and not a manual Refresh), skip the folder rescan --
     # it runs `git rev-parse` on every repo just to rediscover them. Poll only
     # the force-active repos from the already-known set and reuse cached data for
     # the rest so they stay in the UI. New repos surface on Unpause or Refresh.
     if app.paused and not force:
+        live = []
         for repo_key, existing in list(app.repos.items()):
             if app.repo_overrides.get(repo_key, "") == "active":
-                results[repo_key] = _poll_one_repo(existing.path, existing, True, force)
+                live.append((repo_key, existing.path, existing, True))
             else:
                 results[repo_key] = _cached_repo_result(existing.path, existing)
+        results.update(_run_poll_batch(live, force))
         ui_queue.put(("poll_result", results, _non_git_for_rebuild(), force))
         return
 
@@ -750,18 +871,23 @@ def bg_poll_repos(force=False):
             continue
         repo_paths = []
         non_git_paths = []
-        parent_is_repo = is_git_repo(folder_path)
+        # Probe the watched folder and all its children in one concurrent pass
+        # (order preserved), instead of one blocking `git rev-parse` each.
+        children = [c for c in sorted(folder_path.iterdir())
+                    if c.is_dir() and not c.name.startswith(".")]
+        probed = [folder_path] + children
+        is_repo_flags = _map_is_git_repo(probed)
+        parent_is_repo = is_repo_flags[0]
         if parent_is_repo:
             repo_paths.append(folder_path)
         candidate_non_git = []
         git_child_count = 0
-        for child in sorted(folder_path.iterdir()):
-            if child.is_dir() and not child.name.startswith("."):
-                if is_git_repo(child):
-                    repo_paths.append(child)
-                    git_child_count += 1
-                else:
-                    candidate_non_git.append(child)
+        for child, child_is_repo in zip(children, is_repo_flags[1:]):
+            if child_is_repo:
+                repo_paths.append(child)
+                git_child_count += 1
+            else:
+                candidate_non_git.append(child)
         if not parent_is_repo and git_child_count == 0:
             # Watched folder itself isn't git and has no git children -- surface
             # the folder itself so it can be Init'd. Don't list its subfolders;
@@ -782,9 +908,10 @@ def bg_poll_repos(force=False):
             # commit older than recent_days) is polled only on the slow idle
             # cadence -- the CPU win for the many rarely-touched repos. New repos,
             # manual Refresh (force), and force-active overrides always poll live.
-            # idle_last_poll holds each repo's last *live* poll time (stamped below
-            # on every real poll), so a repo just polled as new/active isn't
-            # immediately re-polled the cycle it's reclassified idle.
+            # idle_last_poll holds each repo's last *live* poll time (stamped
+            # below whenever one is scheduled), so a repo just polled as
+            # new/active isn't immediately re-polled the cycle it's
+            # reclassified idle.
             if (existing and not force and repo_override != "active"
                     and not is_repo_active(existing.last_commit_ts,
                                            bool(existing.entries),
@@ -794,7 +921,7 @@ def bg_poll_repos(force=False):
                 results[repo_key] = _cached_repo_result(rp, existing)
                 continue
             repo_force = force or repo_override == "active"
-            results[repo_key] = _poll_one_repo(rp, existing, repo_force, force)
+            live.append((repo_key, rp, existing, repo_force))
             app.idle_last_poll[repo_key] = now
         for ngp in non_git_paths:
             ng_key = str(ngp)
@@ -804,6 +931,7 @@ def bg_poll_repos(force=False):
                 ng_mtime = 0.0
             non_git_results[ng_key] = {"path": ngp, "name": ngp.name,
                                        "mtime": ng_mtime}
+    results.update(_run_poll_batch(live, force))
     ui_queue.put(("poll_result", results, non_git_results, force))
 
 
@@ -1370,6 +1498,16 @@ def cb_poll_changed(sender, app_data):
         pass
 
 
+def cb_poll_threads(sender, app_data):
+    """How many repos a poll cycle works on at once (see _run_poll_batch)."""
+    try:
+        val = int(dpg.get_value(sender))
+        app.poll_threads = max(1, min(POLL_FANOUT_MAX, val))
+        _save_settings()
+    except (ValueError, TypeError):
+        pass
+
+
 def cb_auto_generate(sender, app_data):
     app.auto_generate = dpg.get_value(sender)
     _save_settings()
@@ -1471,6 +1609,14 @@ def cb_open_settings(sender, app_data):
                               min_value=5, min_clamped=True, max_value=600, max_clamped=True,
                               callback=cb_poll_changed, step=0)
             dpg.add_text("s", color=COL_DIM)
+        with dpg.group(horizontal=True):
+            dpg.add_text("Poll threads:", color=COL_DIM)
+            dpg.add_input_int(default_value=app.poll_threads, width=80,
+                              min_value=1, min_clamped=True,
+                              max_value=POLL_FANOUT_MAX, max_clamped=True,
+                              callback=cb_poll_threads, step=0)
+        dpg.add_text("8 is the practical max on Windows -- process spawn,\n"
+                     "not bandwidth, is the limit", color=COL_DIM)
         dpg.add_spacer(height=6)
         dpg.add_text("Behavior", color=COL_ACCENT)
         dpg.add_checkbox(label="Auto-generate commit messages",
@@ -3375,6 +3521,15 @@ def process_queue():
             app.last_results = results
             app.last_non_git = non_git
             rebuild_repos_ui(results, non_git, clear_errors=clear_errors)
+            # Poll workers can't persist (saving reads the viewport, which is
+            # main-thread only), so flush the visibility cache here -- once per
+            # cycle, dropping entries for repos that are no longer watched.
+            if app.visibility_cache_dirty:
+                app.visibility_cache_dirty = False
+                if results:
+                    for stale in set(app.visibility_cache) - set(results):
+                        del app.visibility_cache[stale]
+                _save_settings()
 
         elif kind == "gen_result":
             _, repo_name, message, error = msg
@@ -4082,6 +4237,8 @@ def main():
         app.auto_generate = saved.get("auto_generate", False)
         app.always_on_top = saved.get("always_on_top", False)
         app.poll_interval = saved.get("poll_interval", 30)
+        app.poll_threads = max(1, min(POLL_FANOUT_MAX,
+                                      int(saved.get("poll_threads", 8) or 8)))
         if "model" in saved:
             app.model = saved["model"]
         if "provider" in saved:
@@ -4095,6 +4252,8 @@ def main():
         app.recent_days = saved.get("recent_days", 14)
         app.idle_poll_interval = saved.get("idle_poll_interval", 900)
         app.repo_overrides = saved.get("repo_overrides", {})
+        vis = saved.get("visibility_cache", {})
+        app.visibility_cache = dict(vis) if isinstance(vis, dict) else {}
         app.sort_by_date = saved.get("sort_by_date", False)
         if not folders_from_cli:
             # Support new list format and migrate old single-folder format

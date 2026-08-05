@@ -45,12 +45,14 @@ def test_paused_polls_only_active_repo():
     calls = {"is_git_repo": 0, "status_paths": []}
 
     r1, r2, r3 = (f"C:/repos/r{i}" for i in (1, 2, 3))
-    m.app = SimpleNamespace(
+    # The real AppState, not a SimpleNamespace: bg_poll_repos reads settings
+    # like poll_threads, and a hand-rolled stand-in silently rots as fields
+    # are added.
+    m.app = m.AppState(
         repos={r1: _fake_repo(r1), r2: _fake_repo(r2), r3: _fake_repo(r3)},
         repo_overrides={r2: "active"},      # only r2 is forced active
         paused=True,
         watched_folders=["C:/repos"],       # must NOT be scanned while paused
-        non_git_folders={},
     )
 
     posted = []
