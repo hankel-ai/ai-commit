@@ -4,7 +4,7 @@ import fnmatch
 import json
 import os
 import re
-import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -1094,80 +1094,129 @@ class KiroCliError(Exception):
     pass
 
 
-def generate_message_kiro(diff, model):
-    """Call kiro-cli via WSL and return the generated commit message.
+# Native Windows kiro-cli. Kiro CLI installs a `kiro-cli.exe` and keeps its data
+# under %LOCALAPPDATA%\kiro-cli, but the exe itself is not always on PATH (an
+# installer that only extends PATH for *new* shells, or a portable unzip), so a
+# PATH miss falls back to the documented install locations before giving up.
+KIRO_CLI_EXE_ENV = "AI_COMMIT_KIRO_CLI"
+KIRO_CLI_TIMEOUT = 180
 
-    Writes the prompt to a temp file and pipes it via stdin to kiro-cli
-    to avoid shell escaping and argument-length issues.
-    Raises KiroCliError on any failure.
+
+def _kiro_cli_candidates():
+    """Fallback install locations for kiro-cli, in preference order."""
+    exe = "kiro-cli.exe" if os.name == "nt" else "kiro-cli"
+    roots = []
+    for var in ("LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "USERPROFILE"):
+        val = os.environ.get(var)
+        if val:
+            roots.append(Path(val))
+    if not roots:
+        roots.append(Path.home())
+
+    rels = (
+        ("Programs", "kiro-cli", exe),
+        ("Programs", "kiro-cli", "bin", exe),
+        ("kiro-cli", exe),
+        ("kiro-cli", "bin", exe),
+        ("Programs", "Kiro", "bin", exe),
+        ("Kiro", "bin", exe),
+        (".local", "bin", exe),
+    )
+    seen = set()
+    out = []
+    for root in roots:
+        for rel in rels:
+            cand = root.joinpath(*rel)
+            key = str(cand).lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(cand)
+    return out
+
+
+def resolve_kiro_cli():
+    """Return the path to the native kiro-cli executable.
+
+    Order: AI_COMMIT_KIRO_CLI override -> PATH -> known install locations.
+    Raises KiroCliError naming everywhere that was searched if none exists.
     """
-    import tempfile
+    override = os.environ.get(KIRO_CLI_EXE_ENV, "").strip().strip('"')
+    if override:
+        if Path(override).is_file():
+            return override
+        raise KiroCliError(
+            f"{KIRO_CLI_EXE_ENV} points at '{override}', which does not exist."
+        )
 
+    found = shutil.which("kiro-cli")
+    if found:
+        return found
+
+    candidates = _kiro_cli_candidates()
+    for cand in candidates:
+        if cand.is_file():
+            return str(cand)
+
+    searched = "\n".join(f"  {c}" for c in candidates)
+    raise KiroCliError(
+        "Could not find 'kiro-cli'.\n"
+        "Install Kiro CLI, or set the "
+        f"{KIRO_CLI_EXE_ENV} environment variable to its full path.\n"
+        f"Searched PATH and:\n{searched}"
+    )
+
+
+def generate_message_kiro(diff, model, exe=None):
+    """Call the native kiro-cli and return the generated commit message.
+
+    The prompt goes in on the process's stdin, so there is no temp file, no
+    shell and no argument-length limit. Raises KiroCliError on any failure.
+    """
+    exe = exe or resolve_kiro_cli()
     prompt = SYSTEM_PROMPT + "\n\n" + diff
 
-    # Write prompt to a temp file on the Windows side
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8",
-    )
+    # argv, not a shell string -- a model name from settings/env is a plain
+    # argument here and so cannot inject anything.
+    cmd = [exe, "chat", "--no-interactive", "--model", model]
+
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
-        tmp.write(prompt)
-        tmp.close()
-
-        # Convert Windows path to WSL path
-        win_path = tmp.name.replace("\\", "/")
-        if len(win_path) >= 2 and win_path[1] == ":":
-            wsl_path = f"/mnt/{win_path[0].lower()}{win_path[2:]}"
-        else:
-            wsl_path = win_path
-
-        # Pipe file content into kiro-cli stdin (avoids bash arg-length limits).
-        # shlex.quote both values -- they end up inside a bash -lc string, so an
-        # unquoted model name from settings/env could inject shell commands.
-        bash_cmd = (
-            f"cat {shlex.quote(wsl_path)} | "
-            f"kiro-cli chat --no-interactive --model {shlex.quote(model)} 2>/dev/null"
+        result = subprocess.run(
+            cmd,
+            input=prompt,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=KIRO_CLI_TIMEOUT,
+            **kwargs,
         )
-        cmd = ["wsl", "--", "bash", "-lc", bash_cmd]
-
-        kwargs = {}
-        if os.name == "nt":
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-        try:
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=180,
-                **kwargs,
-            )
-        except FileNotFoundError:
-            raise KiroCliError(
-                "Could not find 'wsl' command.\n"
-                "Ensure WSL is installed and kiro-cli is available inside it."
-            )
-        except subprocess.TimeoutExpired:
-            raise KiroCliError("kiro-cli timed out after 180 seconds.")
-    finally:
-        os.unlink(tmp.name)
+    except FileNotFoundError as exc:
+        raise KiroCliError(f"Could not run kiro-cli at '{exe}'.") from exc
+    except OSError as exc:
+        raise KiroCliError(f"Could not run kiro-cli at '{exe}': {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise KiroCliError(
+            f"kiro-cli timed out after {KIRO_CLI_TIMEOUT} seconds."
+        ) from exc
 
     if result.returncode != 0:
-        err = result.stderr.strip() or result.stdout.strip()
+        err = (result.stderr or "").strip() or (result.stdout or "").strip()
         raise KiroCliError(f"kiro-cli exited with code {result.returncode}:\n{err}")
 
-    content = result.stdout.strip()
+    content = (result.stdout or "").strip()
     if not content:
         raise KiroCliError("kiro-cli returned empty output.")
-    # Strip ANSI escape codes from kiro-cli's colored output
+    return clean_kiro_output(content)
+
+
+def clean_kiro_output(content):
+    """Strip kiro-cli's ANSI colouring and the leading '> ' it prefixes replies with."""
     content = re.sub(r"\x1b\[[0-9;]*m", "", content)
-    # Strip the leading "> " prefix kiro-cli adds to responses
-    lines = content.splitlines()
-    cleaned = []
-    for line in lines:
-        line = re.sub(r"^>\s?", "", line)
-        cleaned.append(line)
+    cleaned = [re.sub(r"^>\s?", "", line) for line in content.splitlines()]
     return "\n".join(cleaned).strip()
 
 

@@ -13,7 +13,15 @@ AI-powered git commit message generator with GUI and CLI interfaces.
 ## AI Providers
 
 - **Ollama** (default) — HTTP API to local/remote Ollama instance (`/api/chat`)
-- **Kiro** — Via WSL `kiro-cli` command
+- **Kiro** — Native Windows `kiro-cli.exe` (**not** WSL). `resolve_kiro_cli()` looks at
+  `AI_COMMIT_KIRO_CLI` (full path override) → `PATH` → known install locations
+  (`%LOCALAPPDATA%\Programs\kiro-cli\`, `%LOCALAPPDATA%\kiro-cli\`, `…\Kiro\bin\`,
+  `%USERPROFILE%\.local\bin\`, each also with a `bin\` variant), and raises a
+  `KiroCliError` naming everywhere it looked. The prompt is fed to
+  `kiro-cli chat --no-interactive --model <model>` on **stdin** — no temp file, no
+  shell, no argument-length limit. Resolution always yields an **absolute** path,
+  which matters on Windows: `subprocess` (CreateProcess) can launch a `.cmd`/`.bat`
+  shim by full path but cannot find one via PATH lookup itself.
 
 Default model: `qwen3-coder:480b-cloud` (configurable via settings or `AI_COMMIT_MODEL` env var)
 
@@ -89,7 +97,7 @@ Raw (venv must exist): `%USERPROFILE%\.venvs\ai-commit\Scripts\python.exe ai-com
 
 - **Diff privacy**: `get_diff` withholds the content of untracked files whose basename matches `SENSITIVE_FILE_PATTERNS` (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `*secret*`, etc. — see `is_sensitive_filename`) and never follows symlinks. The filename still appears in the prompt so the commit message can mention it. Matters because the default model (`qwen3-coder:480b-cloud`) is proxied to Ollama's cloud.
 - **Activity log redaction**: `activity_log.redact_credentials` masks URL-embedded credentials (`https://token@host` → `https://***@host`) in every entry's message/detail before buffering/writing — git echoes remote URLs (incl. PATs) in push/fetch errors.
-- **Kiro provider**: model name and temp path are `shlex.quote`d before interpolation into the `wsl -- bash -lc` command string (settings/env-supplied model names can't inject shell).
+- **Kiro provider**: the call is a plain argv list against the resolved `kiro-cli.exe` — no shell, no `bash -lc` string, so a settings/env-supplied model name is just an argument and cannot inject anything. (This replaced the old WSL path, where model name and temp path had to be `shlex.quote`d into a `wsl -- bash -lc` string.) The prompt goes over stdin rather than a temp file, so it never touches disk. Tests: `python tests/test_kiro_provider.py`.
 - **gh token**: never written to disk; piped to `gh_workflow_viewer.py` via stdin (see Actions viewer above).
 - Tests: `python tests/test_security.py` (symlink test self-skips without symlink privilege).
 
