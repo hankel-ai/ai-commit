@@ -58,7 +58,7 @@ def _stub_git_ops():
 def test_bg_refresh_single_repo_posts_force_flag():
     """The queue message must carry the force flag to the handler."""
     r1 = "C:/repos/r1"
-    m.app = SimpleNamespace(
+    m.app = m.AppState(
         repos={r1: _fake_repo(r1, m.GenStatus.ERROR, "Push failed: blocked")},
         non_git_folders={},
     )
@@ -79,7 +79,7 @@ def _run_handler(force):
     import queue as _queue
     r1 = "C:/repos/r1"
     rs = _fake_repo(r1, m.GenStatus.ERROR, "Push failed: blocked")
-    m.app = SimpleNamespace(repos={r1: rs}, non_git_folders={})
+    m.app = m.AppState(repos={r1: rs}, non_git_folders={})
 
     rebuilds = []
     m.rebuild_repos_ui = lambda *a, **kw: rebuilds.append((a, kw))
@@ -125,7 +125,7 @@ def test_single_refresh_preserves_other_repos_commit_ts():
     rs1 = _fake_repo(r1, m.GenStatus.IDLE)
     rs2 = _fake_repo(r2, m.GenStatus.IDLE)
     rs2.last_commit_ts = 1_234_567.0
-    m.app = SimpleNamespace(repos={r1: rs1, r2: rs2}, non_git_folders={})
+    m.app = m.AppState(repos={r1: rs1, r2: rs2}, non_git_folders={})
 
     captured = []
     m.rebuild_repos_ui = lambda *a, **kw: captured.append(a)

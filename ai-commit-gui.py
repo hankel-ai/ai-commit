@@ -323,6 +323,9 @@ class AppState:
     active_gh_account: str = ""
     non_git_folders: dict = field(default_factory=dict)
     repo_overrides: dict = field(default_factory=dict)  # repo_key -> "pause" or "active"
+    poll_pending: set = field(default_factory=set)  # repo_keys polled live this cycle that haven't reported back yet (streaming poll)
+    poll_stream_dirty: bool = False  # a streamed repo result arrived -> rebuild on the next throttle tick
+    poll_stream_last_rebuild: float = 0.0  # monotonic stamp of the last streaming rebuild
     expand_on_next_build: set = field(default_factory=set)  # repo_keys to auto-expand on next UI rebuild (used when paused + single-repo Refresh)
     collapse_on_next_build: set = field(default_factory=set)  # repo_keys to re-apply the activity default (collapse if idle) on next UI rebuild, overriding preserve_open (used after Commit & Push)
 
@@ -342,6 +345,14 @@ executor = ThreadPoolExecutor(max_workers=4)
 # threads and local git barely scales at all -- process creation, not
 # bandwidth, is the limit. Anything past ~8 is dead weight; 16 is just headroom.
 POLL_FANOUT_MAX = 16
+
+# Streaming poll: each repo's result is rendered as it lands instead of waiting
+# for the whole cycle, so a slow or unreachable remote no longer holds up every
+# other repo. rebuild_repos_ui is a full teardown-and-rebuild of the list, so
+# repainting once per arriving repo would be O(n^2); process_queue coalesces
+# everything that arrived since the last repaint and repaints at most this often.
+POLL_STREAM_INTERVAL = 0.25  # seconds
+
 _hwnd = None  # Cached viewport HWND (Windows)
 _nswindow = None  # Cached NSWindow (macOS)
 _pending_topmost = None  # Deferred macOS topmost change (True/False/None)
@@ -785,8 +796,13 @@ def _map_is_git_repo(paths):
         return list(ex.map(_safe_is_git_repo, paths))
 
 
-def _run_poll_batch(live, force):
+def _run_poll_batch(live, force, on_result=None):
     """Poll every (repo_key, path, existing, repo_force) in *live* at once.
+
+    *on_result*, if given, is called as ``on_result(repo_key, info)`` the moment
+    each repo finishes, so the caller can stream it to the UI instead of holding
+    everything back until the slowest repo returns. It is called on the pool's
+    completion thread and must not touch Dear PyGui directly.
 
     A poll cycle is dominated by network I/O -- a `git fetch` and a
     `gh repo view` per repo -- run one repo at a time. Fanning out cuts a
@@ -826,7 +842,39 @@ def _run_poll_batch(live, force):
                 )
                 if existing is not None:
                     out[repo_key] = _cached_repo_result(rp, existing)
+            if on_result is not None:
+                # Report even a repo that raised and had no cache to fall back
+                # on, so it stops counting as pending in the UI.
+                on_result(repo_key, out.get(repo_key))
     return out
+
+
+def _post_poll_stream(pending, delta=None, non_git=None):
+    """Hand the UI a slice of a poll that is still running.
+
+    *delta* is ``repo_key -> info`` to merge into what's already shown, *pending*
+    the repo_keys this cycle is still waiting on. The final ``poll_result``
+    remains authoritative; this only gets results on screen sooner.
+    """
+    ui_queue.put(("poll_stream", delta or {}, set(pending), non_git))
+
+
+def _poll_streamer(pending):
+    """An ``on_result`` callback for _run_poll_batch that streams each arrival.
+
+    *pending* is mutated as repos report in. It runs on the pool's completion
+    thread, so the set is guarded by a lock and only ever posted as a snapshot;
+    the UI thread must not see a set being mutated underneath it.
+    """
+    lock = threading.Lock()
+
+    def on_result(repo_key, info):
+        with lock:
+            pending.discard(repo_key)
+            snapshot = set(pending)
+        _post_poll_stream(snapshot, {repo_key: info} if info else None)
+
+    return on_result
 
 
 def bg_poll_repos(force=False):
@@ -861,7 +909,9 @@ def bg_poll_repos(force=False):
                 live.append((repo_key, existing.path, existing, True))
             else:
                 results[repo_key] = _cached_repo_result(existing.path, existing)
-        results.update(_run_poll_batch(live, force))
+        pending = {repo_key for repo_key, _rp, _existing, _rf in live}
+        _post_poll_stream(pending, results, _non_git_for_rebuild())
+        results.update(_run_poll_batch(live, force, _poll_streamer(pending)))
         ui_queue.put(("poll_result", results, _non_git_for_rebuild(), force))
         return
 
@@ -931,7 +981,11 @@ def bg_poll_repos(force=False):
                 ng_mtime = 0.0
             non_git_results[ng_key] = {"path": ngp, "name": ngp.name,
                                        "mtime": ng_mtime}
-    results.update(_run_poll_batch(live, force))
+    # Everything already known (cached / idle-tier / paused repos) plus the
+    # non-git folders can render immediately; the live ones stream in below.
+    pending = {repo_key for repo_key, _rp, _existing, _rf in live}
+    _post_poll_stream(pending, results, non_git_results)
+    results.update(_run_poll_batch(live, force, _poll_streamer(pending)))
     ui_queue.put(("poll_result", results, non_git_results, force))
 
 
@@ -3319,7 +3373,7 @@ def _non_git_for_rebuild():
 
 
 def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
-                     preserve_open=False):
+                     preserve_open=False, pending=None):
     """Rebuild repo sections from poll results.
 
     If a repo's file list changed since last poll, its pending commit message
@@ -3331,6 +3385,12 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
     generate) so repos are not auto-collapsed, and False for full refreshes (the
     automatic poll loop and manual Refresh-all), which reapply the activity
     default. See compute_header_open() in ai_commit_core.
+
+    *pending* is the set of repo_keys a streaming poll has scheduled but not yet
+    heard back from. They get a dim "..." placeholder row, because this function
+    clears repos_container wholesale -- without it, a mid-cycle repaint would
+    erase the placeholders "repo_loading" put there and those repos would vanish
+    from the list until their own poll returned.
     """
     # Capture current open/collapse state before the headers are destroyed so a
     # partial rebuild can restore it (keyed by path).
@@ -3475,6 +3535,15 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
                 continue
             build_non_git_section(ngf, "repos_container",
                                   preserve_open=preserve_open, prior_open=prior_open)
+    # Repos this streaming cycle is still waiting on: keep a placeholder so they
+    # don't disappear from the list between repaints. Never counted as hidden --
+    # they are shown, just not resolved yet.
+    for repo_key in sorted(pending or ()):
+        if repo_key in new_repos:
+            continue
+        dpg.add_text(f"  {Path(repo_key).name}  ...", color=COL_DIM,
+                     parent="repos_container")
+
     if dpg.does_item_exist("hidden_count_label"):
         dpg.set_value("hidden_count_label",
                       f"{hidden_count} hidden" if (app.recent_only and hidden_count) else "")
@@ -3512,10 +3581,30 @@ def process_queue():
         if kind == "active_gh_account":
             app.active_gh_account = msg[1]
 
+        elif kind == "poll_stream":
+            # One repo (or the opening batch of already-known ones) from a poll
+            # in flight. Merge and mark dirty only -- the repaint is coalesced
+            # after the queue drains, so a burst of arrivals costs one rebuild.
+            delta = msg[1]
+            pending = msg[2] if len(msg) > 2 else set()
+            non_git = msg[3] if len(msg) > 3 else None
+            if delta:
+                app.last_results = dict(app.last_results)
+                app.last_results.update(delta)
+            if non_git is not None:
+                app.last_non_git = non_git
+            app.poll_pending = pending
+            app.poll_stream_dirty = True
+
         elif kind == "poll_result":
             results = msg[1]
             non_git = msg[2] if len(msg) > 2 else {}
             clear_errors = msg[3] if len(msg) > 3 else False
+            # The cycle is over: this payload is authoritative, so drop any
+            # streaming state rather than letting a stale repaint follow it.
+            app.poll_pending = set()
+            app.poll_stream_dirty = False
+            app.poll_stream_last_rebuild = time.monotonic()
             # Cache the raw payload so the "Recent only" toggle can re-render the
             # list (applying/removing the filter) without spawning a poll.
             app.last_results = results
@@ -4156,6 +4245,19 @@ def process_queue():
 
         elif kind == "tray_quit":
             dpg.stop_dearpygui()
+
+    # Coalesced repaint for a streaming poll. Done once here rather than per
+    # "poll_stream" message: rebuild_repos_ui tears down and rebuilds the whole
+    # list, so repainting per arriving repo would be O(n^2) on a 50-repo launch.
+    # preserve_open keeps headers as the user left them while the cycle fills in
+    # (the final poll_result reapplies the activity default).
+    if app.poll_stream_dirty:
+        stream_now = time.monotonic()
+        if stream_now - app.poll_stream_last_rebuild >= POLL_STREAM_INTERVAL:
+            app.poll_stream_dirty = False
+            app.poll_stream_last_rebuild = stream_now
+            rebuild_repos_ui(app.last_results, app.last_non_git,
+                             preserve_open=True, pending=app.poll_pending)
 
 
 # ---------------------------------------------------------------------------

@@ -71,29 +71,40 @@ def test_repo_lock_identity():
 
 
 def test_run_git_serializes_per_repo():
-    """Two threads running git in the same repo must not overlap."""
-    # Restore a real-ish run_git that we can instrument for concurrency.
+    """Two threads running git in the same repo must not overlap.
+
+    Instruments subprocess.Popen, which is what _run_git spawns through: it
+    needs a hard timeout and a killable process tree, neither of which
+    subprocess.run can provide (see tests/test_git_timeout.py).
+    """
     overlap = {"max": 0, "cur": 0}
     guard = threading.Lock()
 
-    real_subprocess_run = core.subprocess.run
+    real_popen = core.subprocess.Popen
 
-    class _Result:
+    class _FakePopen:
+        """The slice of the Popen contract _run_git uses."""
+
+        pid = -1
         returncode = 0
-        stdout = ""
-        stderr = ""
 
-    def fake_run(*a, **k):
-        with guard:
-            overlap["cur"] += 1
-            overlap["max"] = max(overlap["max"], overlap["cur"])
-        time.sleep(0.02)
-        with guard:
-            overlap["cur"] -= 1
-        return _Result()
+        def __init__(self, *a, **k):
+            pass
+
+        def communicate(self, timeout=None):
+            with guard:
+                overlap["cur"] += 1
+                overlap["max"] = max(overlap["max"], overlap["cur"])
+            time.sleep(0.02)
+            with guard:
+                overlap["cur"] -= 1
+            return "", ""
+
+        def kill(self):
+            pass
 
     core.run_git = _ORIG_RUN_GIT  # undo earlier tests' monkeypatch
-    core.subprocess.run = fake_run
+    core.subprocess.Popen = _FakePopen
     core._GIT_LOGGER = None
     try:
         threads = [
@@ -105,7 +116,7 @@ def test_run_git_serializes_per_repo():
         for t in threads:
             t.join()
     finally:
-        core.subprocess.run = real_subprocess_run
+        core.subprocess.Popen = real_popen
     check("same_repo_never_overlaps", overlap["max"] == 1)
 
 

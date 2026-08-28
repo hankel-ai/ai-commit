@@ -176,7 +176,7 @@ def _drive_queue(message, repo):
     m.update_repo_status = lambda rs: None
     m.clear_commit_input = lambda rs: None
     m.executor = SimpleNamespace(submit=lambda fn, *a, **kw: None)
-    m.app = SimpleNamespace(repos={message[1]: repo}, non_git_folders={},
+    m.app = m.AppState(repos={message[1]: repo}, non_git_folders={},
                             collapse_on_next_build=set())
     real_dpg, real_prompt = m.dpg, _REAL_PROMPT
     m.dpg = _NoopDpg()

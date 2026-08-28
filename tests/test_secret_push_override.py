@@ -73,7 +73,7 @@ def _fake_repo(path, gen_status=None, error_message=""):
 
 def test_bg_push_override_command():
     r1 = "C:/repos/r1"
-    m.app = SimpleNamespace(repos={r1: _fake_repo(r1)}, non_git_folders={})
+    m.app = m.AppState(repos={r1: _fake_repo(r1)}, non_git_folders={})
     posted = []
     m.ui_queue = SimpleNamespace(put=lambda item: posted.append(item))
     calls = []
@@ -107,7 +107,7 @@ def _drive_queue(message, repo):
     m._show_secret_push_prompt = (
         lambda repo_name, branch="": prompts.append((repo_name, branch)))
     m.update_repo_status = lambda rs: None
-    m.app = SimpleNamespace(repos={message[1]: repo}, non_git_folders={},
+    m.app = m.AppState(repos={message[1]: repo}, non_git_folders={},
                             collapse_on_next_build=set())
     m.process_queue()
     return prompts

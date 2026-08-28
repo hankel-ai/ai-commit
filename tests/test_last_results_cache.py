@@ -51,7 +51,7 @@ def _drive_single_refresh(stale_entries, fresh_info):
     commit refresh arrives with `fresh_info`. Returns app after the handler."""
     r1 = "C:/repos/r1"
     rs = _fake_repo(r1, fresh_info["entries"])
-    m.app = SimpleNamespace(
+    m.app = m.AppState(
         repos={r1: rs}, non_git_folders={},
         last_results={r1: {"path": Path(r1), "entries": stale_entries,
                            "remote_url": "", "github_account": "", "visibility": "",

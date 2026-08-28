@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -91,50 +92,188 @@ def _repo_lock(cwd):
         return lock
 
 
-def _run_git(args, cwd, binary=False):
-    """Shared runner for :func:`run_git` / :func:`run_git_bytes`."""
+# Every git command is bounded. Without this the GUI hangs on startup: the first
+# poll fetches each new repo, and an unreachable/stalled remote (corporate proxy
+# that accepts the connection and never answers, VPN down) leaves `git fetch`
+# blocked forever. _run_poll_batch joins all its futures, so a single stuck fetch
+# means poll_result is never posted and *every* repo sits on "..." -- and the
+# worker is gone for good, so the pool bleeds threads until nothing polls at all.
+#
+# Two layers, because neither alone is enough (both measured against a real
+# black-hole listener that accepts TCP and never replies):
+#
+# 1. git polices itself. GIT_HTTP_LOW_SPEED_* is curl's stall watchdog and aborts
+#    with a real error message and a clean exit. GIT_TERMINAL_PROMPT=0 (plus
+#    stdin=DEVNULL) covers the *other* hang shape -- git asking for credentials
+#    under pythonw.exe, where there is no console to answer on.
+# 2. A hard timeout for what layer 1 can't see (a connect that never completes).
+#    It must kill the process TREE: git spawns a `git remote-http` grandchild
+#    that inherits the stdout/stderr pipes, so plain subprocess.run(timeout=...)
+#    does NOT recover -- it kills git, then blocks forever in communicate()
+#    waiting on pipes the surviving grandchild still holds open.
+GIT_TIMEOUT_LOCAL = 60
+GIT_TIMEOUT_NETWORK = 300
+# Poll-path fetches are a background nicety; don't let one hold a poll worker for
+# the full network backstop.
+GIT_TIMEOUT_POLL_FETCH = 60
+GIT_TIMEOUT_RC = 124  # conventional "timed out" exit code, as used by /bin/timeout
+_GIT_NETWORK_SUBCOMMANDS = frozenset({"fetch", "push", "pull", "clone", "ls-remote"})
+
+
+def _git_env():
+    """Environment for git subprocesses: never prompt, never stall silently.
+
+    Every value is a ``setdefault`` -- an operator who has deliberately set one
+    of these keeps their value.
+    """
+    env = dict(os.environ)
+    # No credential/username prompt: there is no console to answer it on.
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    # curl stall watchdog: under 1 byte/s for 20s is a dead connection.
+    env.setdefault("GIT_HTTP_LOW_SPEED_LIMIT", "1")
+    env.setdefault("GIT_HTTP_LOW_SPEED_TIME", "20")
+    # The SSH equivalent -- BatchMode so a passphrase/host-key question fails
+    # fast instead of waiting on a prompt nobody can see.
+    env.setdefault(
+        "GIT_SSH_COMMAND",
+        "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new",
+    )
+    return env
+
+
+# Global git options that consume the *next* argument. Without these,
+# `git -c foo=bar pull` looks like the subcommand is "foo=bar".
+_GIT_GLOBAL_OPTS_WITH_VALUE = frozenset({
+    "-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path",
+    "--config-env",
+})
+
+
+def git_subcommand(args):
+    """The subcommand in an argv list, skipping git's global options."""
+    it = iter(str(a) for a in args)
+    for arg in it:
+        if arg in _GIT_GLOBAL_OPTS_WITH_VALUE:
+            next(it, None)
+            continue
+        if arg.startswith("-"):
+            continue
+        return arg
+    return ""
+
+
+def _default_git_timeout(args):
+    """Seconds to allow a git command before the hard kill."""
+    if git_subcommand(args) in _GIT_NETWORK_SUBCOMMANDS:
+        return GIT_TIMEOUT_NETWORK
+    return GIT_TIMEOUT_LOCAL
+
+
+def _kill_git_tree(proc):
+    """Kill *proc* and its descendants.
+
+    Killing only *proc* is not enough: `git fetch` runs the transport as a
+    separate `git remote-http` child which inherits our stdout/stderr pipe
+    handles, and those pipes stay open (so communicate() stays blocked) for as
+    long as that grandchild lives.
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except OSError:
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def _run_git(args, cwd, binary=False, timeout=None):
+    """Shared runner for :func:`run_git` / :func:`run_git_bytes`.
+
+    Returns ``(rc, stdout, stderr)``. A command that outruns its timeout is
+    killed (tree and all) and reported as ``GIT_TIMEOUT_RC`` with an explanatory
+    stderr, so callers -- and the activity log -- see a failure instead of
+    waiting forever.
+    """
+    if timeout is None:
+        timeout = _default_git_timeout(args)
     kwargs = {}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    else:
+        # Own process group, so _kill_git_tree can signal the whole tree.
+        kwargs["start_new_session"] = True
     if not binary:
         kwargs.update(text=True, encoding="utf-8", errors="replace")
+    empty = b"" if binary else ""
     start = time.perf_counter()
     with _repo_lock(cwd):
-        result = subprocess.run(
-            ["git"] + args, cwd=cwd, capture_output=True, **kwargs
+        proc = subprocess.Popen(
+            ["git"] + args, cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=_git_env(), **kwargs,
         )
-    stderr = result.stderr
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            rc = proc.returncode
+        except subprocess.TimeoutExpired:
+            _kill_git_tree(proc)
+            try:
+                stdout, stderr = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = empty, empty
+            rc = GIT_TIMEOUT_RC
+            timed_out = (
+                f"git {' '.join(str(a) for a in args)} timed out after "
+                f"{timeout}s and was killed."
+            )
+            stderr = (timed_out.encode("utf-8") if binary
+                      else timed_out)
     if binary:
-        stderr = stderr.decode("utf-8", "replace")
+        stderr_text = stderr.decode("utf-8", "replace")
+    else:
+        stderr_text = stderr
     if _GIT_LOGGER is not None:
         try:
             _GIT_LOGGER(
-                args, cwd, result.returncode,
+                args, cwd, rc,
                 int((time.perf_counter() - start) * 1000),
-                stderr,
+                stderr_text,
             )
         except Exception:
             pass
-    return result.returncode, result.stdout, stderr
+    return rc, stdout, stderr_text
 
 
-def run_git(args, cwd):
+def run_git(args, cwd, timeout=None):
     """Run a git command and return (returncode, stdout, stderr).
 
     Serialized per repo dir (see ``_repo_lock``) so concurrent app threads can't
-    collide on the same repo's index.
+    collide on the same repo's index, and bounded by ``timeout`` (defaulted from
+    the subcommand) so no caller can block forever.
     """
-    return _run_git(args, cwd)
+    return _run_git(args, cwd, timeout=timeout)
 
 
-def run_git_bytes(args, cwd):
+def run_git_bytes(args, cwd, timeout=None):
     """Like :func:`run_git` but stdout stays raw ``bytes`` (stderr is decoded).
 
     Text mode applies universal-newline translation, which rewrites CRLF to LF
     in the captured output -- fatal when the *point* of the call is to inspect
     line endings (see :func:`is_eol_only_change`).
     """
-    return _run_git(args, cwd, binary=True)
+    return _run_git(args, cwd, binary=True, timeout=timeout)
+
 
 
 def is_git_repo(path):
@@ -360,11 +499,17 @@ def read_status_branch(cwd):
 def fetch_remote(cwd):
     """Fetch from origin silently, pruning stale remote-tracking refs.
 
-    Errors (offline, no remote) are ignored. Split out of get_sync_status so the
-    folded poll path can fetch once, then read fresh ahead/behind from the
-    status --branch header.
+    Errors (offline, no remote, timeout) are ignored. Split out of
+    get_sync_status so the folded poll path can fetch once, then read fresh
+    ahead/behind from the status --branch header.
+
+    Bounded by GIT_TIMEOUT_POLL_FETCH rather than the general network budget:
+    this runs on a poll worker for every new repo, so a remote that stalls must
+    give the worker back promptly. The repo just keeps its last known
+    ahead/behind until a later cycle succeeds.
     """
-    run_git(["fetch", "--prune", "--quiet"], cwd=cwd)
+    run_git(["fetch", "--prune", "--quiet"], cwd=cwd,
+            timeout=GIT_TIMEOUT_POLL_FETCH)
 
 
 def get_git_global_user():
