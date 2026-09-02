@@ -1391,6 +1391,53 @@ def is_secret_push_block(text):
             or "push blocked: secrets detected" in lowered)
 
 
+def is_push_rule_block(text):
+    """True if a server-side hook declined the push for a reason NO push
+    option can bypass -- a GitLab push rule (prohibited file name, commit
+    message regex, max file size, author email) or a GitHub protected-branch
+    hook.
+
+    Deliberately excludes the secret-push-protection block, which reaches the
+    client through the same "pre-receive hook declined" line but DOES have a
+    documented one-push bypass. `-o secret_push_protection.skip_all` skips
+    secret DETECTION only, so offering that override for a push rule would
+    send the user round a retry loop that cannot succeed.
+
+    Matches on the hook decline rather than on any rule wording: which rule
+    fired is the server's message to print (see remote_reject_reason), not
+    something to enumerate here.
+    """
+    if not text or is_secret_push_block(text):
+        return False
+    flat = " ".join(text.lower().split())
+    return "hook declined" in flat or "hook refused" in flat
+
+
+def remote_reject_reason(text):
+    """The remote's own explanation for a rejected push, as plain lines.
+
+    Git prefixes everything the server said with "remote: "; those lines carry
+    the actual reason (which rule, which file, which pattern) while the local
+    lines around them only report THAT something declined. Returns the remote
+    lines with the prefix and any banner-only line ("remote: GitLab:") removed,
+    falling back to the raw text when the failure had no remote half at all --
+    a caller showing this to the user must never end up with an empty string.
+    """
+    if not text:
+        return ""
+    lines = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped.lower().startswith("remote:"):
+            continue
+        body = stripped[len("remote:"):].strip()
+        # "remote:" spacers and the bare "GitLab:" banner carry no information.
+        if not body or body.rstrip(":").lower() in ("gitlab", "github", "error"):
+            continue
+        lines.append(body)
+    return "\n".join(lines) if lines else text.strip()
+
+
 def needs_upstream_setup(text):
     """True if a push failed only because the branch has no same-named
     remote branch to push to -- the class of failure that

@@ -84,9 +84,11 @@ from ai_commit_core import (
     do_commit_and_push,
     describe_empty_diff,
     do_pull,
+    is_push_rule_block,
     is_secret_push_block,
     needs_upstream_setup,
     parse_upstream_mismatch,
+    remote_reject_reason,
     should_offer_push,
     SECRET_PUSH_SKIP_OPTION,
     generate_message,
@@ -2160,6 +2162,64 @@ def _show_secret_push_prompt(repo_name, branch=""):
             )
 
 
+def _show_push_rule_prompt(repo_name, detail, branch=""):
+    """A server-side push rule declined the push -- show WHY, offer no retry.
+
+    Unlike secret push protection this has no bypass, so a "Push Anyway"
+    button would be a lie. The one thing the user actually needs is the
+    remote's own sentence (which rule, which file, which pattern), which the
+    sticky status line clips at the panel edge on a long single-line
+    rejection. Copy Error puts the whole raw failure on the clipboard.
+    """
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    reason = remote_reject_reason(detail)
+    win_tag = dpg.generate_uuid()
+    pop_w = 620
+    # Grow with the reason so a multi-rule rejection isn't itself truncated.
+    pop_h = min(460, 190 + 18 * max(0, len(reason.split("\n")) - 1))
+    click_pos = dpg.get_mouse_pos()
+    px = max(0, int(click_pos[0]) - pop_w // 2)
+    py = max(0, int(click_pos[1]))
+
+    with dpg.window(
+        label=f"Push Rejected by Remote -- {rs.name}",
+        tag=win_tag,
+        width=pop_w, height=pop_h,
+        pos=(px, py),
+        no_collapse=True,
+        on_close=lambda s, a, u: (
+            dpg.delete_item(s) if dpg.does_item_exist(s) else None
+        ),
+    ):
+        dpg.add_text("A server-side hook declined this push:", color=COL_RED)
+        dpg.add_text(reason, color=COL_RED, wrap=pop_w - 40)
+        dpg.add_spacer(height=4)
+        dpg.add_text("This is a push rule, not secret push protection -- no "
+                     "push option bypasses it. The commit is safe locally; fix "
+                     "what the rule names (amend or rebase it out) and push "
+                     "again, or ask a repo admin to relax the rule.",
+                     color=COL_DIM, wrap=pop_w - 40)
+        if branch:
+            dpg.add_text(f"origin/{branch} was NOT created -- the ref update "
+                         f"was refused whole.", color=COL_DIM, wrap=pop_w - 40)
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True):
+            dpg.add_button(
+                label="Copy Error",
+                user_data=detail,
+                callback=lambda s, a, u: dpg.set_clipboard_text(u),
+            )
+            dpg.add_button(
+                label="Close",
+                user_data=win_tag,
+                callback=lambda s, a, u: (
+                    dpg.delete_item(u) if dpg.does_item_exist(u) else None
+                ),
+            )
+
+
 def _cb_confirm_secret_push(sender, app_data, user_data):
     """User confirmed pushing past secret push protection."""
     repo_name, branch, win_tag = user_data
@@ -2721,7 +2781,12 @@ def update_repo_status(rs):
         dpg.set_value(rs.status_tag, f"Generating with {app.model}...")
         dpg.configure_item(rs.status_tag, color=COL_YELLOW)
     elif rs.gen_status == GenStatus.ERROR:
-        dpg.set_value(rs.status_tag, f"Error: {rs.error_message}")
+        # Hard-wrap: dpg's own wrap does not break a single very long line
+        # here, so a one-line remote rejection ("remote: GitLab: File name X
+        # was prohibited by the pattern ...") gets clipped at the panel edge
+        # with the reason off-screen.
+        dpg.set_value(rs.status_tag,
+                      _wrap_for_display(f"Error: {rs.error_message}"))
         dpg.configure_item(rs.status_tag, color=COL_RED)
     elif rs.gen_status == GenStatus.DONE:
         dpg.set_value(rs.status_tag, "Message ready.")
@@ -2958,7 +3023,7 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
     else:
         if rs.gen_status == GenStatus.ERROR and rs.error_message:
             rs.status_tag = dpg.add_text(
-                f"Error: {rs.error_message}",
+                _wrap_for_display(f"Error: {rs.error_message}"),
                 color=COL_RED, parent=rs.header_tag, wrap=0)
         else:
             rs.status_tag = dpg.add_text("Clean", color=COL_DIM, parent=rs.header_tag)
@@ -3864,6 +3929,11 @@ def process_queue():
                 # offer a one-time `-o secret_push_protection.skip_all` retry.
                 if is_secret_push_block(detail):
                     _show_secret_push_prompt(repo_name)
+                # A push rule (prohibited file name, protected branch, ...)
+                # declined it instead: no bypass exists, so show the remote's
+                # reason rather than a sticky error clipped at the panel edge.
+                elif is_push_rule_block(detail):
+                    _show_push_rule_prompt(repo_name, detail)
             else:
                 rs.gen_status = GenStatus.ERROR
                 rs.error_message = detail
@@ -3892,6 +3962,12 @@ def process_queue():
                 # --set-upstream since the branch still has no tracking ref.
                 if is_secret_push_block(detail):
                     _show_secret_push_prompt(repo_name, upstream_branch)
+                # Declined by a push rule instead. Carry the branch so the
+                # popup can say the remote branch was NOT created -- with a
+                # --set-upstream push the ref update is refused whole, and the
+                # local tracking config is left untouched.
+                elif is_push_rule_block(detail):
+                    _show_push_rule_prompt(repo_name, detail, upstream_branch)
                 # A bare push (banner Push button, or an override retry) that
                 # git refused for want of a same-named remote branch: offer the
                 # same --set-upstream prompt the commit path offers, instead of
