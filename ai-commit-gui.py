@@ -328,6 +328,7 @@ class AppState:
     poll_stream_last_rebuild: float = 0.0  # monotonic stamp of the last streaming rebuild
     expand_on_next_build: set = field(default_factory=set)  # repo_keys to auto-expand on next UI rebuild (used when paused + single-repo Refresh)
     collapse_on_next_build: set = field(default_factory=set)  # repo_keys to re-apply the activity default (collapse if idle) on next UI rebuild, overriding preserve_open (used after Commit & Push)
+    show_pull_prompt_on_next_poll: bool = False  # transient: "Pull" button clicked, refresh pending, show prompt on poll_result
 
 
 # ---------------------------------------------------------------------------
@@ -1067,6 +1068,40 @@ def bg_pull(repo_name):
         ui_queue.put(("pull_result", repo_name, False, str(exc)))
 
 
+def bg_pull_all(repo_keys):
+    """Pull a batch of repos one at a time, refreshing each as it lands.
+
+    Deliberately sequential on a SINGLE worker rather than one
+    `executor.submit(bg_pull, ...)` per repo. `executor` has 4 workers and
+    also serves the poll and every other UI action, so N concurrent
+    `git pull`s -- each allowed up to GIT_TIMEOUT_NETWORK (300s) -- occupy
+    every worker and the app stops responding until they drain. One worker
+    leaves 3 free and makes progress observable repo by repo.
+
+    A failure posts a *sticky* error rather than a plain status line: the
+    next repo's refresh rebuilds the whole list (see the
+    `single_repo_refresh` handler) and would wipe a plain line.
+    """
+    for repo_key in repo_keys:
+        rs = app.repos.get(repo_key)
+        if not rs:
+            continue
+        ui_queue.put(("pull_all_status", repo_key, "Pulling...", COL_YELLOW))
+        try:
+            activity_log.log_event("Pull", repo=repo_key)
+            ok, detail = do_pull(rs.path)
+        except Exception as exc:
+            ok, detail = False, str(exc)
+        if ok:
+            ui_queue.put(("pull_all_status", repo_key,
+                          "Pulled successfully!", COL_GREEN))
+            # Inline, not executor.submit -- stay on this one worker so the
+            # pulls stay serialized behind their own refreshes.
+            bg_refresh_single_repo(repo_key)
+        else:
+            ui_queue.put(("pull_all_failed", repo_key, detail))
+
+
 def bg_preview_pull(repo_name):
     """Fetch incoming changes for preview. Posts result to ui_queue."""
     rs = app.repos.get(repo_name)
@@ -1477,6 +1512,19 @@ def cb_browse(sender, app_data):
 def cb_refresh(sender, app_data):
     # Manual Refresh = forced poll: re-read remote_url and fetch,
     # matching what startup does. Otherwise a moved remote stays cached.
+    trigger_poll(force=True)
+
+
+def cb_pull_all(sender, app_data):
+    """Refresh every repo, then offer to pull the clean ones that are behind.
+
+    Two-phase on purpose: eligibility depends on `behind`, which is only
+    accurate just after a fetch. Asking straight from cached counts would
+    offer repos that have nothing to pull and miss ones that do. The forced
+    poll marks each header with "..." so the wait is visible; the
+    `poll_result` handler shows the prompt once the cycle finishes.
+    """
+    app.show_pull_prompt_on_next_poll = True
     trigger_poll(force=True)
 
 
@@ -1951,6 +1999,118 @@ def _cb_confirm_upstream(sender, app_data, user_data):
     dpg.set_value(rs.status_tag, f"Pushing to origin/{branch}...")
     dpg.configure_item(rs.status_tag, color=COL_YELLOW)
     executor.submit(bg_push_set_upstream, repo_name, branch)
+
+
+def pull_all_eligible(repos):
+    """Split *repos* (repo_key -> RepoState) into (eligible, dirty_count).
+
+    Eligible = no pending local changes AND behind > 0. Pulling into a dirty
+    tree risks a conflicted merge, and a repo that isn't behind has nothing
+    to pull -- running `git pull` on it would be a pointless network round
+    trip. Pure so it can be tested without a GUI.
+    """
+    eligible, dirty = [], 0
+    for key, rs in repos.items():
+        if rs.entries:
+            dirty += 1
+        elif rs.behind > 0:
+            eligible.append(key)
+    return eligible, dirty
+
+
+def _show_pull_notice(message):
+    """Small modal saying why a bulk pull has nothing to do. Returns its tag."""
+    notice_tag = dpg.generate_uuid()
+    with dpg.window(
+        label="Pull All", tag=notice_tag, width=400, height=120,
+        no_collapse=True, modal=True,
+        on_close=lambda s, a, u: (
+            dpg.delete_item(s) if dpg.does_item_exist(s) else None
+        ),
+    ):
+        dpg.add_text(message, wrap=380)
+        dpg.add_spacer(height=8)
+        dpg.add_button(
+            label="OK",
+            callback=lambda s, a, u: (
+                dpg.delete_item(u) if dpg.does_item_exist(u) else None
+            ),
+            user_data=notice_tag,
+        )
+    return notice_tag
+
+
+def _show_pull_all_prompt():
+    """Confirm before pulling every clean repo that is behind its remote.
+
+    Runs after the forced refresh kicked off by the Pull button, so the
+    ahead/behind counts it reads are freshly fetched. Returns the tag of the
+    window it created.
+    """
+    total = len(app.repos)
+    eligible, dirty = pull_all_eligible(app.repos)
+
+    if not eligible:
+        if not total:
+            msg = "No repos are being watched."
+        elif dirty == total:
+            msg = ("Every watched repo has pending local changes -- "
+                   "nothing to pull.")
+        else:
+            msg = "Nothing to pull -- every clean repo is already up to date."
+        return _show_pull_notice(msg)
+
+    win_tag = dpg.generate_uuid()
+    with dpg.window(
+        label="Pull latest changes?",
+        tag=win_tag,
+        width=440, height=160,
+        no_collapse=True, modal=True,
+        on_close=lambda s, a, u: (
+            dpg.delete_item(s) if dpg.does_item_exist(s) else None
+        ),
+    ):
+        dpg.add_text(f"Pull {len(eligible)} of {total} repo(s) with incoming"
+                     f" changes?")
+        if dirty:
+            dpg.add_text(
+                f"{dirty} repo(s) with pending local changes will be skipped.",
+                color=COL_DIM, wrap=420,
+            )
+        dpg.add_text("Repos are pulled one at a time.", color=COL_DIM, wrap=420)
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True):
+            proceed_btn = dpg.add_button(
+                label="Pull All",
+                callback=_cb_confirm_pull_all,
+                user_data=(eligible, win_tag),
+            )
+            dpg.bind_item_theme(proceed_btn, green_btn_theme)
+            dpg.add_button(
+                label="Cancel",
+                callback=lambda s, a, u: (
+                    dpg.delete_item(u) if dpg.does_item_exist(u) else None
+                ),
+                user_data=win_tag,
+            )
+    return win_tag
+
+
+def _cb_confirm_pull_all(sender, app_data, user_data):
+    """User confirmed the bulk pull -- hand the batch to one worker."""
+    eligible, win_tag = user_data
+    if dpg.does_item_exist(win_tag):
+        dpg.delete_item(win_tag)
+    # Re-validate: the dialog can sit open across a poll cycle, so a repo may
+    # have gone dirty, caught up, or been unwatched since the list was built.
+    still_eligible = []
+    for repo_key in eligible:
+        rs = app.repos.get(repo_key)
+        if rs and not rs.entries and rs.behind > 0:
+            still_eligible.append(repo_key)
+    if not still_eligible:
+        return
+    executor.submit(bg_pull_all, still_eligible)
 
 
 def _show_secret_push_prompt(repo_name, branch=""):
@@ -2547,7 +2707,16 @@ def _rebuild_folders_ui():
 
 
 def update_repo_status(rs):
-    """Update the status text for a repo based on its gen_status."""
+    """Update the status text for a repo based on its gen_status.
+
+    A repo that the recency filter hides is not re-rendered by
+    `rebuild_repos_ui`, so `rs.status_tag` still names the text item the
+    previous render created -- and that one died with `repos_container`.
+    Writing to a destroyed item id crashes Dear PyGui rather than no-opping,
+    so every caller has to be safe against it.
+    """
+    if not rs.status_tag or not dpg.does_item_exist(rs.status_tag):
+        return
     if rs.gen_status == GenStatus.GENERATING:
         dpg.set_value(rs.status_tag, f"Generating with {app.model}...")
         dpg.configure_item(rs.status_tag, color=COL_YELLOW)
@@ -3619,6 +3788,10 @@ def process_queue():
                     for stale in set(app.visibility_cache) - set(results):
                         del app.visibility_cache[stale]
                 _save_settings()
+            # If "Pull" button was clicked and refresh is now complete, show the prompt
+            if app.show_pull_prompt_on_next_poll:
+                app.show_pull_prompt_on_next_poll = False
+                _show_pull_all_prompt()
 
         elif kind == "gen_result":
             _, repo_name, message, error = msg
@@ -3956,14 +4129,34 @@ def process_queue():
         elif kind == "pull_result":
             _, repo_name, ok, detail = msg
             rs = app.repos.get(repo_name)
-            if rs:
+            # The status row may have been torn down by a rebuild between the
+            # pull starting and finishing -- writing to a deleted item id
+            # crashes Dear PyGui, it does not just no-op.
+            if rs and rs.status_tag and dpg.does_item_exist(rs.status_tag):
                 if ok:
                     dpg.set_value(rs.status_tag, "Pulled successfully!")
                     dpg.configure_item(rs.status_tag, color=COL_GREEN)
-                    executor.submit(bg_refresh_single_repo, repo_name)
                 else:
                     dpg.set_value(rs.status_tag, f"Pull failed: {detail}")
                     dpg.configure_item(rs.status_tag, color=COL_RED)
+            if rs and ok:
+                executor.submit(bg_refresh_single_repo, repo_name)
+
+        elif kind == "pull_all_status":
+            _, repo_key, text, color = msg
+            rs = app.repos.get(repo_key)
+            if rs and rs.status_tag and dpg.does_item_exist(rs.status_tag):
+                dpg.set_value(rs.status_tag, text)
+                dpg.configure_item(rs.status_tag, color=color)
+
+        elif kind == "pull_all_failed":
+            _, repo_key, detail = msg
+            rs = app.repos.get(repo_key)
+            if rs:
+                # Sticky, so the next repo's refresh rebuild can't wipe it.
+                rs.gen_status = GenStatus.ERROR
+                rs.error_message = f"Pull failed: {detail}"
+                update_repo_status(rs)
 
         elif kind == "clean_preview_result":
             _, repo_name, ok, output = msg
@@ -4460,11 +4653,16 @@ def main():
         dpg.add_group(tag="folders_container")
 
         with dpg.group(horizontal=True):
-            dpg.add_button(label="Add Folder", callback=cb_browse)
+            dpg.add_button(label="+", callback=cb_browse)
+            with dpg.tooltip(dpg.last_item()):
+                dpg.add_text("Add Folder")
             dpg.add_button(label="Refresh", callback=cb_refresh)
+            dpg.add_button(label="Pull", callback=cb_pull_all)
             dpg.add_button(label="Pause", tag="pause_btn", callback=cb_pause)
             dpg.add_button(label="Settings", callback=cb_open_settings)
-            dpg.add_button(label="Activity Log", callback=cb_open_activity_log)
+            dpg.add_button(label="Activity", callback=cb_open_activity_log)
+            with dpg.tooltip(dpg.last_item()):
+                dpg.add_text("Activity Log")
             dpg.add_checkbox(label="Date", tag="sort_by_date_cb",
                              default_value=app.sort_by_date, callback=cb_sort_by_date)
             with dpg.tooltip(dpg.last_item()):
