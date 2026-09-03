@@ -73,6 +73,7 @@ import dearpygui.dearpygui as dpg
 import webbrowser
 
 import activity_log
+import git_proxy
 from ai_commit_core import (
     STATUS_LABELS,
     KiroCliError,
@@ -331,6 +332,8 @@ class AppState:
     expand_on_next_build: set = field(default_factory=set)  # repo_keys to auto-expand on next UI rebuild (used when paused + single-repo Refresh)
     collapse_on_next_build: set = field(default_factory=set)  # repo_keys to re-apply the activity default (collapse if idle) on next UI rebuild, overriding preserve_open (used after Commit & Push)
     show_pull_prompt_on_next_poll: bool = False  # transient: "Pull" button clicked, refresh pending, show prompt on poll_result
+    git_proxy_enabled: bool = False  # serve the watched repos read-only over LAN HTTP
+    git_proxy_port: int = git_proxy.DEFAULT_PORT
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +422,8 @@ def _save_settings():
             "repo_overrides": app.repo_overrides,
             "visibility_cache": app.visibility_cache,
             "sort_by_date": app.sort_by_date,
+            "git_proxy_enabled": app.git_proxy_enabled,
+            "git_proxy_port": app.git_proxy_port,
         }
         _SETTINGS_FILE.write_text(json.dumps(data))
     except Exception:
@@ -1691,6 +1696,86 @@ def cb_idle_interval(sender, app_data):
         pass
 
 
+# ---------------------------------------------------------------------------
+# Git proxy (read-only LAN git remote)
+# ---------------------------------------------------------------------------
+
+_git_proxy = None  # git_proxy.GitProxy, created on first enable
+_GIT_PROXY_PORT_MIN = 1024
+_GIT_PROXY_PORT_MAX = 65535
+
+
+def _clamp_proxy_port(value):
+    """A usable, non-privileged port. Falls back to the default on junk."""
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return git_proxy.DEFAULT_PORT
+    if port < _GIT_PROXY_PORT_MIN or port > _GIT_PROXY_PORT_MAX:
+        return git_proxy.DEFAULT_PORT
+    return port
+
+
+def _apply_git_proxy():
+    """Start or stop the LAN git proxy to match ``app.git_proxy_enabled``.
+
+    The single place the server is started or stopped, so toggling the setting
+    takes effect immediately with no restart. Main thread only -- it writes the
+    Settings status line.
+    """
+    global _git_proxy
+    status = ""
+    if app.git_proxy_enabled:
+        if _git_proxy is None:
+            _git_proxy = git_proxy.GitProxy(lambda: list(app.watched_folders))
+        elif _git_proxy.is_running and _git_proxy.port != app.git_proxy_port:
+            _git_proxy.stop()  # port changed -> rebind
+        if _git_proxy.is_running:
+            status = "Serving read-only at  %s" % _git_proxy.base_url()
+        else:
+            ok, message = _git_proxy.start(port=app.git_proxy_port)
+            if ok:
+                status = "Serving read-only at  %s" % _git_proxy.base_url()
+                activity_log.log_event("Git proxy enabled", detail=status)
+            else:
+                status = "Not running -- %s" % message
+    else:
+        if _git_proxy is not None and _git_proxy.is_running:
+            _git_proxy.stop()
+            activity_log.log_event("Git proxy disabled")
+        status = "Off"
+    if dpg.does_item_exist("git_proxy_status"):
+        dpg.set_value("git_proxy_status", status)
+    return status
+
+
+def _git_proxy_clone_url():
+    if _git_proxy is not None and _git_proxy.is_running:
+        return _git_proxy.base_url()
+    return ""
+
+
+def cb_git_proxy_enabled(sender, app_data):
+    app.git_proxy_enabled = bool(dpg.get_value(sender))
+    _save_settings()
+    _apply_git_proxy()
+
+
+def cb_git_proxy_port(sender, app_data):
+    port = _clamp_proxy_port(dpg.get_value(sender))
+    if port == app.git_proxy_port:
+        return
+    app.git_proxy_port = port
+    _save_settings()
+    _apply_git_proxy()
+
+
+def cb_git_proxy_copy_url(sender, app_data):
+    url = _git_proxy_clone_url()
+    if url:
+        dpg.set_clipboard_text(url)
+
+
 def cb_open_settings(sender, app_data):
     """Open the settings popup window."""
     win_tag = "settings_window"
@@ -1700,7 +1785,7 @@ def cb_open_settings(sender, app_data):
     with dpg.window(
         label="Settings",
         tag=win_tag,
-        width=340, height=400,
+        width=340, height=560,
         no_collapse=True,
         on_close=lambda s, a, u: (
             dpg.delete_item(s) if dpg.does_item_exist(s) else None
@@ -1753,6 +1838,23 @@ def cb_open_settings(sender, app_data):
                                default_value=app.ollama_url, width=-1,
                                callback=cb_ollama_url_changed, on_enter=True,
                                hint="http://localhost:11434")
+        dpg.add_spacer(height=6)
+        dpg.add_text("Git Proxy (LAN)", color=COL_ACCENT)
+        dpg.add_checkbox(label="Serve watched repos over LAN (read-only)",
+                         default_value=app.git_proxy_enabled,
+                         callback=cb_git_proxy_enabled)
+        with dpg.group(horizontal=True):
+            dpg.add_text("Port:", color=COL_DIM)
+            dpg.add_input_int(default_value=app.git_proxy_port, width=90,
+                              min_value=_GIT_PROXY_PORT_MIN, min_clamped=True,
+                              max_value=_GIT_PROXY_PORT_MAX, max_clamped=True,
+                              callback=cb_git_proxy_port, step=0)
+            dpg.add_button(label="Copy URL", callback=cb_git_proxy_copy_url)
+        dpg.add_text("", tag="git_proxy_status", color=COL_DIM, wrap=310)
+        dpg.add_text("Others can 'git clone <url>/<repo>.git'. Fetch/pull only --\n"
+                     "pushing is refused. No authentication: LAN clients only.",
+                     color=COL_DIM)
+        _apply_git_proxy()  # fills in the status line just created
         dpg.add_spacer(height=6)
         dpg.add_text("Display", color=COL_ACCENT)
         dpg.add_checkbox(label="Show non-git folders",
@@ -4626,6 +4728,8 @@ def main():
         vis = saved.get("visibility_cache", {})
         app.visibility_cache = dict(vis) if isinstance(vis, dict) else {}
         app.sort_by_date = saved.get("sort_by_date", False)
+        app.git_proxy_enabled = bool(saved.get("git_proxy_enabled", False))
+        app.git_proxy_port = _clamp_proxy_port(saved.get("git_proxy_port"))
         if not folders_from_cli:
             # Support new list format and migrate old single-folder format
             saved_folders = saved.get("watched_folders", [])
@@ -4806,6 +4910,7 @@ def main():
 
     # Build initial folders list and poll
     _rebuild_folders_ui()
+    _apply_git_proxy()  # off unless the user enabled it
     trigger_poll()
 
     # Render loop
@@ -4865,6 +4970,8 @@ def main():
     _save_settings()
 
     # Cleanup
+    if _git_proxy is not None:
+        _git_proxy.stop()
     executor.shutdown(wait=False)
     if tray_icon:
         try:

@@ -68,7 +68,33 @@ python ai-commit-gui.py --model mistral --poll 15
 - **Always-on-top**: compact window stays visible while you work
 - **Drag-to-move**: custom title bar with drag support
 - **GitHub Actions viewer**: after pushing, automatically detects any triggered workflow runs and opens a live status window with per-step logs, run cancellation, and direct GitHub links
+- **Git proxy (LAN)**: turns ai-commit into a read-only git remote for every repo it watches, so other machines on your network can clone and pull without GitHub and without copying folders around. Off by default -- see below
 - **Init non-git folders**: with "Show non-git folders" enabled, any watched folder that isn't a git repo gets an `Init` button. This includes the folder you added directly (when it has no git sub-folders), and non-git siblings of existing repos inside a container folder
+
+## Git proxy (LAN)
+
+Serve every watched repo as a real git remote on your local network -- useful for pulling a
+change onto another machine without pushing it to GitHub first, and without copying the folder
+by hand.
+
+Enable it in **Settings -> Git Proxy (LAN)** (off by default). The status line shows the base
+URL, e.g. `http://192.168.1.65:8418/`. Browse that URL for an index of every repo it is serving
+with a copy-paste clone URL.
+
+```bash
+git clone http://192.168.1.65:8418/my-project.git
+git pull                      # from then on, like any other remote
+```
+
+- **Read-only.** Only `git-upload-pack` is served, so clone, fetch and pull work and **push is
+  refused**. Nothing on the network can write into the repos you are about to commit.
+- **Every repo currently watched** is served, including ones the *Recent only* filter is hiding.
+  Remove the folder from ai-commit and it stops being served.
+- **No authentication.** Requests are accepted only from private/loopback/Tailscale addresses.
+  Put a reverse proxy in front if you want a real gate -- use HTTP Basic auth, not a
+  browser-based SSO login, which git cannot complete.
+- Toggling the setting (or changing the port) takes effect immediately; no restart.
+- On Windows the inbound port usually needs a firewall rule before other machines can reach it.
 
 ## Options
 
@@ -102,6 +128,7 @@ ai-commit.py            # CLI wrapper
 ai-commit-gui.py        # Dear PyGui GUI application
 gh_workflows.py         # GitHub Actions API client (run detection, log fetching)
 gh_workflow_viewer.py   # Standalone Actions viewer window (launched as subprocess)
+git_proxy.py            # Read-only Git Smart HTTP server for the LAN (opt-in)
 requirements.txt        # GUI dependencies (dearpygui, pystray, Pillow)
 ```
 
