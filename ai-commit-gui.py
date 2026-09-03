@@ -331,6 +331,7 @@ class AppState:
     poll_stream_last_rebuild: float = 0.0  # monotonic stamp of the last streaming rebuild
     expand_on_next_build: set = field(default_factory=set)  # repo_keys to auto-expand on next UI rebuild (used when paused + single-repo Refresh)
     collapse_on_next_build: set = field(default_factory=set)  # repo_keys to re-apply the activity default (collapse if idle) on next UI rebuild, overriding preserve_open (used after Commit & Push)
+    expanded_changes: set = field(default_factory=set)  # repo_keys whose change list the user expanded past MAX_SHOWN_CHANGES; reset when that repo's entries change
     show_pull_prompt_on_next_poll: bool = False  # transient: "Pull" button clicked, refresh pending, show prompt on poll_result
     git_proxy_enabled: bool = False  # serve the watched repos read-only over LAN HTTP
     git_proxy_port: int = git_proxy.DEFAULT_PORT
@@ -351,6 +352,12 @@ executor = ThreadPoolExecutor(max_workers=4)
 # threads and local git barely scales at all -- process creation, not
 # bandwidth, is the limit. Anything past ~8 is dead weight; 16 is just headroom.
 POLL_FANOUT_MAX = 16
+
+# Cap on change-list rows rendered inline per repo. A repo with dozens of dirty
+# files would push everything below its expanded header off screen; beyond this
+# many, a "+N more" link reveals the rest (expanded_changes) until the repo's
+# entry list changes.
+MAX_SHOWN_CHANGES = 20
 
 # Streaming poll: each repo's result is rendered as it lands instead of waiting
 # for the whole cycle, so a slow or unreachable remote no longer holds up every
@@ -1657,6 +1664,19 @@ def cb_recent_only(sender, app_data):
         if tag != sender and dpg.does_item_exist(tag):
             dpg.set_value(tag, app.recent_only)
     _save_settings()
+    if app.last_results or app.last_non_git:
+        rebuild_repos_ui(app.last_results, app.last_non_git, preserve_open=True)
+    else:
+        trigger_poll()
+
+
+def cb_show_more_changes(sender, app_data, user_data):
+    """Reveal a repo's change rows beyond MAX_SHOWN_CHANGES. Display-only:
+    re-renders from the last poll payload, no git work. The reveal survives
+    rebuilds until that repo's entry list changes (invalidated in
+    rebuild_repos_ui where files_changed is computed)."""
+    repo_key = user_data
+    app.expanded_changes.add(repo_key)
     if app.last_results or app.last_non_git:
         rebuild_repos_ui(app.last_results, app.last_non_git, preserve_open=True)
     else:
@@ -3061,7 +3081,13 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
 
     rs.files_group_tag = dpg.add_group(parent=rs.header_tag)
     repo_key = str(rs.path)
-    for code, filepath in rs.entries:
+    if len(rs.entries) > MAX_SHOWN_CHANGES and repo_key not in app.expanded_changes:
+        shown_entries = rs.entries[:MAX_SHOWN_CHANGES]
+        hidden = len(rs.entries) - MAX_SHOWN_CHANGES
+    else:
+        shown_entries = rs.entries
+        hidden = 0
+    for code, filepath in shown_entries:
         lbl = STATUS_LABELS.get(code, code)
         color = COL_GREEN if code in ("A", "AM", "??") else COL_YELLOW if code in ("M", "MM") else COL_RED if code == "D" else COL_DIM
         with dpg.group(horizontal=True, parent=rs.files_group_tag):
@@ -3086,6 +3112,14 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
                     user_data=(str(rs.path), filepath),
                 )
                 dpg.bind_item_theme(btn, link_btn_theme)
+    if hidden:
+        more_btn = dpg.add_button(
+            label=f"+{hidden} more",
+            callback=cb_show_more_changes,
+            user_data=repo_key,
+            parent=rs.files_group_tag,
+        )
+        dpg.bind_item_theme(more_btn, link_btn_theme)
 
     if not rs.entries:
         dpg.add_text("  No changes", color=COL_DIM, parent=rs.files_group_tag)
@@ -3769,6 +3803,10 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
         files_changed = True
         if old_rs is not None:
             files_changed = (old_rs.entries != new_entries)
+            if files_changed:
+                # The "+N more" reveal shows a slice of the OLD list; reset it
+                # so the user is never left reading a stale expanded list.
+                app.expanded_changes.discard(name)
 
         if new_entries or info.get("behind", 0) > 0:
             any_changes = True
