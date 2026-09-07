@@ -64,7 +64,7 @@ python ai-commit-gui.py --model mistral --poll 15
 - **Per-repo controls**: Generate, Accept & Push, Regenerate buttons for each repo
 - **Editable messages**: commit message input is always editable
 - **Auto-generate**: toggle to automatically generate messages when changes are detected
-- **System tray**: close button hides to tray; right-click tray to Show or Quit
+- **System tray**: close button hides to tray; left-click the tray icon toggles the window (show to front / hide again); right-click for Show / Hide or Quit
 - **Always-on-top**: compact window stays visible while you work
 - **Drag-to-move**: custom title bar with drag support
 - **GitHub Actions viewer**: after pushing, automatically detects any triggered workflow runs and opens a live status window with per-step logs, run cancellation, and direct GitHub links

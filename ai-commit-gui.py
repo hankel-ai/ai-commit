@@ -191,6 +191,16 @@ if sys.platform == "win32":
     _user32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
     _user32.SetWindowLongPtrW.restype = ctypes.c_void_p
 
+    # GetForegroundWindow -- void* restype so a 64-bit HWND is not truncated
+    _user32.GetForegroundWindow.argtypes = []
+    _user32.GetForegroundWindow.restype = ctypes.c_void_p
+
+    # GetClassNameW -- identifies the shell tray as the foreground window
+    _user32.GetClassNameW.argtypes = [
+        ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int,
+    ]
+    _user32.GetClassNameW.restype = ctypes.c_int
+
     # EnumWindows
     WNDENUMPROC = ctypes.WINFUNCTYPE(
         ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p
@@ -635,6 +645,51 @@ def _show_window():
         _window_hidden = False
         if app.always_on_top:
             _set_topmost(True)
+
+
+# Foreground-window classes that mean "the user just clicked the tray", not
+# "another app is in front": clicking a notification icon can hand focus to the
+# taskbar or the overflow flyout, so treat those as still-our-turn.
+_TRAY_FOREGROUND_CLASSES = {
+    "Shell_TrayWnd",
+    "NotifyIconOverflowWindow",
+    "TopLevelWindowForOverflowXamlIsland",
+    "Windows.UI.Core.CoreWindow",
+    "XamlExplorerHostIslandWindow",
+}
+
+
+def _foreground_is_ours_or_tray():
+    """True when the foreground window is this app's, or the shell tray itself."""
+    foreground = _user32.GetForegroundWindow()
+    if not foreground:
+        return True  # nothing has focus -- treat as ours so a click hides
+    if int(foreground) == int(_hwnd):
+        return True
+    proc_id = ctypes.wintypes.DWORD()
+    _user32.GetWindowThreadProcessId(foreground, ctypes.byref(proc_id))
+    if proc_id.value == os.getpid():
+        return True
+    buf = ctypes.create_unicode_buffer(256)
+    _user32.GetClassNameW(foreground, buf, len(buf))
+    return buf.value in _TRAY_FOREGROUND_CLASSES
+
+
+def _toggle_window():
+    """Tray-click toggle: hide if the window is already up front, else show it.
+
+    A visible-but-buried window raises rather than hides, so a click never
+    makes a window the user cannot see "disappear" with no visible effect.
+    """
+    if not _hwnd:
+        return
+    if (_window_hidden or not _user32.IsWindowVisible(_hwnd)
+            or _user32.IsIconic(_hwnd)):
+        _show_window()
+    elif _foreground_is_ours_or_tray():
+        _hide_window()
+    else:
+        _show_window()
 
 
 # ---------------------------------------------------------------------------
@@ -2833,14 +2888,14 @@ def setup_tray():
     _tray_icon_alert = _make_alert_icon(img)
 
     def on_show(icon, item):
-        ui_queue.put(("tray_show", None))
+        ui_queue.put(("tray_toggle", None))
 
     def on_quit(icon, item):
         ui_queue.put(("tray_quit", None))
         icon.stop()
 
     menu = pystray.Menu(
-        pystray.MenuItem("Show", on_show, default=True),
+        pystray.MenuItem("Show / Hide", on_show, default=True),
         pystray.MenuItem("Quit", on_quit),
     )
     tray_icon = pystray.Icon("ai_commit_monitor", img, "AI Commit Monitor", menu)
@@ -4649,8 +4704,8 @@ def process_queue():
                         user_data=win_tag,
                     )
 
-        elif kind == "tray_show":
-            _show_window()
+        elif kind == "tray_toggle":
+            _toggle_window()
 
         elif kind == "tray_quit":
             dpg.stop_dearpygui()
