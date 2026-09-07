@@ -195,11 +195,33 @@ if sys.platform == "win32":
     _user32.GetForegroundWindow.argtypes = []
     _user32.GetForegroundWindow.restype = ctypes.c_void_p
 
-    # GetClassNameW -- identifies the shell tray as the foreground window
-    _user32.GetClassNameW.argtypes = [
-        ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int,
+    # Foreground-lock workaround: AttachThreadInput lets this process activate
+    # its own window even though it did not receive the last input event.
+    _kernel32 = ctypes.windll.kernel32
+    _kernel32.GetCurrentThreadId.argtypes = []
+    _kernel32.GetCurrentThreadId.restype = ctypes.wintypes.DWORD
+
+    _user32.AttachThreadInput.argtypes = [
+        ctypes.wintypes.DWORD, ctypes.wintypes.DWORD, ctypes.c_bool,
     ]
-    _user32.GetClassNameW.restype = ctypes.c_int
+    _user32.AttachThreadInput.restype = ctypes.c_bool
+
+    _user32.BringWindowToTop.argtypes = [ctypes.c_void_p]
+    _user32.BringWindowToTop.restype = ctypes.c_bool
+
+    _user32.SetActiveWindow.argtypes = [ctypes.c_void_p]
+    _user32.SetActiveWindow.restype = ctypes.c_void_p
+
+    _user32.SetFocus.argtypes = [ctypes.c_void_p]
+    _user32.SetFocus.restype = ctypes.c_void_p
+
+    # SwitchToThisWindow is undocumented but exported by every supported
+    # Windows version; it activates a window the way Alt-Tab does.
+    try:
+        _user32.SwitchToThisWindow.argtypes = [ctypes.c_void_p, ctypes.c_bool]
+        _user32.SwitchToThisWindow.restype = None
+    except AttributeError:
+        pass
 
     # EnumWindows
     WNDENUMPROC = ctypes.WINFUNCTYPE(
@@ -636,57 +658,99 @@ def _hide_window():
         _window_hidden = True
 
 
+def _is_foreground():
+    """True when the viewport currently owns the foreground."""
+    if not _hwnd:
+        return False
+    foreground = _user32.GetForegroundWindow()
+    return bool(foreground) and int(foreground) == int(_hwnd)
+
+
+def _force_foreground():
+    """Activate the viewport despite Windows' foreground lock.
+
+    A process that did not receive the last input event may not steal focus, so
+    SetForegroundWindow on its own restores the window without activating it --
+    it comes back where it was in the z-order, behind whatever the user was
+    using. Attaching to the current foreground thread's input queue makes the
+    two threads share an activation state, which lifts that restriction.
+    Everything after the attach is a fallback for when it still refuses.
+    """
+    if not _hwnd or sys.platform != "win32" or _is_foreground():
+        return
+
+    our_thread = _kernel32.GetCurrentThreadId()
+    other_thread = 0
+    foreground = _user32.GetForegroundWindow()
+    if foreground:
+        other_thread = _user32.GetWindowThreadProcessId(foreground, None)
+
+    attached = False
+    if other_thread and other_thread != our_thread:
+        attached = bool(_user32.AttachThreadInput(our_thread, other_thread, True))
+    try:
+        _user32.BringWindowToTop(_hwnd)
+        _user32.SetForegroundWindow(_hwnd)
+        _user32.SetActiveWindow(_hwnd)
+        _user32.SetFocus(_hwnd)
+    finally:
+        if attached:
+            _user32.AttachThreadInput(our_thread, other_thread, False)
+
+    if not _is_foreground():
+        try:
+            _user32.SwitchToThisWindow(_hwnd, True)
+        except (AttributeError, OSError):
+            pass
+
+    # Last resort: a topmost flip puts the window above everything else even
+    # when activation is denied outright, so it is at least visible.
+    if not _is_foreground() and not app.always_on_top:
+        _set_topmost(True)
+        _set_topmost(False)
+
+
 def _show_window():
-    """Show the viewport and bring it to front."""
+    """Show the viewport, restore it if minimized, and bring it to front."""
     global _window_hidden
     if _hwnd:
-        _user32.ShowWindow(_hwnd, 5)  # SW_SHOW
-        _user32.SetForegroundWindow(_hwnd)
+        if _user32.IsIconic(_hwnd):
+            _user32.ShowWindow(_hwnd, 9)  # SW_RESTORE
+        else:
+            _user32.ShowWindow(_hwnd, 5)  # SW_SHOW
         _window_hidden = False
+        _force_foreground()
         if app.always_on_top:
             _set_topmost(True)
 
 
-# Foreground-window classes that mean "the user just clicked the tray", not
-# "another app is in front": clicking a notification icon can hand focus to the
-# taskbar or the overflow flyout, so treat those as still-our-turn.
-_TRAY_FOREGROUND_CLASSES = {
-    "Shell_TrayWnd",
-    "NotifyIconOverflowWindow",
-    "TopLevelWindowForOverflowXamlIsland",
-    "Windows.UI.Core.CoreWindow",
-    "XamlExplorerHostIslandWindow",
-}
+# Clicking a notification icon can hand focus to the taskbar before the click
+# is delivered, so asking "am I foreground?" at click time can wrongly answer
+# no for a window that was in front a moment ago. The render loop samples the
+# real answer every frame instead, and the toggle reads that sample.
+_foreground_seen_at = 0.0
+FOREGROUND_GRACE = 0.5  # seconds a foreground sample stays valid
 
 
-def _foreground_is_ours_or_tray():
-    """True when the foreground window is this app's, or the shell tray itself."""
-    foreground = _user32.GetForegroundWindow()
-    if not foreground:
-        return True  # nothing has focus -- treat as ours so a click hides
-    if int(foreground) == int(_hwnd):
-        return True
-    proc_id = ctypes.wintypes.DWORD()
-    _user32.GetWindowThreadProcessId(foreground, ctypes.byref(proc_id))
-    if proc_id.value == os.getpid():
-        return True
-    buf = ctypes.create_unicode_buffer(256)
-    _user32.GetClassNameW(foreground, buf, len(buf))
-    return buf.value in _TRAY_FOREGROUND_CLASSES
+def _note_foreground():
+    """Record that the viewport owns the foreground right now (called per frame)."""
+    global _foreground_seen_at
+    if _is_foreground():
+        _foreground_seen_at = time.monotonic()
 
 
 def _toggle_window():
-    """Tray-click toggle: hide if the window is already up front, else show it.
+    """Tray-click toggle: hide if the window is in front, else show and raise it.
 
-    A visible-but-buried window raises rather than hides, so a click never
-    makes a window the user cannot see "disappear" with no visible effect.
+    Background but visible counts as "not in front", so the first click brings
+    it forward and only a second click hides it.
     """
     if not _hwnd:
         return
     if (_window_hidden or not _user32.IsWindowVisible(_hwnd)
             or _user32.IsIconic(_hwnd)):
         _show_window()
-    elif _foreground_is_ours_or_tray():
+    elif time.monotonic() - _foreground_seen_at <= FOREGROUND_GRACE:
         _hide_window()
     else:
         _show_window()
@@ -5011,6 +5075,12 @@ def main():
     _last_geom = None
     _geom_dirty_at = None
     while dpg.is_dearpygui_running():
+        # Sample foreground before draining the queue: a tray click posted from
+        # the pystray thread is handled below, and by then the taskbar may
+        # already hold focus.
+        if sys.platform == "win32" and _hwnd:
+            _note_foreground()
+
         process_queue()
 
         # Retry HWND detection if it failed at startup
