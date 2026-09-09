@@ -113,6 +113,9 @@ from ai_commit_core import (
     is_git_repo,
     verify_repo_usable,
     run_git,
+    TYPEAHEAD_TIMEOUT,
+    find_typeahead_match,
+    normalize_typeahead,
 )
 
 import chime
@@ -367,6 +370,9 @@ class AppState:
     show_pull_prompt_on_next_poll: bool = False  # transient: "Pull" button clicked, refresh pending, show prompt on poll_result
     git_proxy_enabled: bool = False  # serve the watched repos read-only over LAN HTTP
     git_proxy_port: int = git_proxy.DEFAULT_PORT
+    typeahead_buf: str = ""  # transient: characters typed to jump to a repo in the list
+    typeahead_ts: float = 0.0  # epoch of the last type-ahead keystroke (buffer expiry)
+    typeahead_miss: bool = False  # the current buffer matched nothing (shown in the toolbar)
 
 
 # ---------------------------------------------------------------------------
@@ -3861,6 +3867,246 @@ def _non_git_for_rebuild():
             for k, ngf in app.non_git_folders.items()}
 
 
+# ---------------------------------------------------------------------------
+# Repo list type-ahead ("type the first few letters to jump to a repo")
+# ---------------------------------------------------------------------------
+# The list is a single scrolling child window whose rows are collapsing headers
+# of *varying* height -- an expanded repo is many rows tall. So the jump can
+# never be computed from a row index; it is computed from the header's real
+# on-screen y position for the current frame, which stays correct no matter
+# which repos are expanded.
+
+_typeahead_keymap_cache = None
+
+
+def _typeahead_keymap():
+    """Map dearpygui key codes -> the character they contribute to the buffer.
+
+    Letters, digits and '-' only. Built lazily because the mvKey_* constants are
+    filled in by the C extension at import time.
+    """
+    global _typeahead_keymap_cache
+    if _typeahead_keymap_cache is None:
+        keymap = {}
+        for ch in "abcdefghijklmnopqrstuvwxyz0123456789":
+            name = "mvKey_" + ch.upper()
+            code = getattr(dpg, name, None)
+            if code is not None:
+                keymap[code] = ch
+        minus = getattr(dpg, "mvKey_Minus", None)
+        if minus is not None:
+            keymap[minus] = "-"
+        period = getattr(dpg, "mvKey_Period", None)
+        if period is not None:
+            keymap[period] = "."
+        _typeahead_keymap_cache = keymap
+    return _typeahead_keymap_cache
+
+
+def _item_in_primary(item):
+    """Whether *item* lives inside the main window (not a settings/dialog window)."""
+    for _ in range(40):
+        if not item or not dpg.does_item_exist(item):
+            return False
+        try:
+            if dpg.get_item_alias(item) == "primary":
+                return True
+            item = dpg.get_item_info(item).get("parent", 0)
+        except Exception:
+            return False
+    return False
+
+
+def _typeahead_blocked():
+    """Whether keystrokes belong to something other than the repo list.
+
+    Blocked while a text/number field has focus (commit message boxes, the model
+    input, settings) and while a dialog window owns the keyboard. Deliberately
+    permissive: if dearpygui cannot answer, type-ahead stays enabled rather than
+    silently dying.
+    """
+    for mod in ("mvKey_LControl", "mvKey_RControl", "mvKey_LAlt", "mvKey_RAlt"):
+        code = getattr(dpg, mod, None)
+        try:
+            if code is not None and dpg.is_key_down(code):
+                return True
+        except Exception:
+            pass
+    try:
+        focused = dpg.get_focused_item()
+    except Exception:
+        focused = 0
+    if focused and dpg.does_item_exist(focused):
+        try:
+            itype = dpg.get_item_info(focused).get("type", "")
+        except Exception:
+            itype = ""
+        if "Input" in itype:
+            return True
+    try:
+        active_window = dpg.get_active_window()
+    except Exception:
+        return False
+    if active_window and dpg.does_item_exist(active_window):
+        return not _item_in_primary(active_window)
+    return False
+
+
+def _typeahead_entries():
+    """The repo/folder rows currently in the list, in on-screen order.
+
+    Read from repos_container's children rather than from app.repos so the order
+    matches what is rendered and rows hidden by the "Recent" filter are skipped.
+    """
+    if not dpg.does_item_exist("repos_container"):
+        return []
+    try:
+        children = dpg.get_item_children("repos_container", 1) or []
+    except Exception:
+        return []
+    by_tag = {}
+    for rs in app.repos.values():
+        if rs.header_tag:
+            by_tag[rs.header_tag] = rs.name
+    for ngf in app.non_git_folders.values():
+        if ngf.header_tag:
+            by_tag[ngf.header_tag] = ngf.name
+    entries = []
+    for child in children:
+        name = by_tag.get(child)
+        if name:
+            entries.append((child, name))
+    return entries
+
+
+def _row_y(item):
+    """Screen y of a list row, or None when dearpygui has no rect for it."""
+    try:
+        rect = dpg.get_item_rect_min(item)
+    except Exception:
+        return None
+    if not rect:
+        return None
+    return float(rect[1])
+
+
+def _scroll_header_into_view(header_tag, entries):
+    """Scroll repos_container so *header_tag* sits at the top of the view.
+
+    The offset is derived from the **first row's** screen y, not the container's.
+    Both rows are laid out in the same frame and shifted by the same scroll, so
+    ``y(header) - y(first_row)`` is exactly the difference in *content* offset,
+    and the first row sits at content offset ~0 -- which makes that difference
+    the scroll value that puts the header at the top. No dependence on the child
+    window's own rect (dearpygui does not reliably expose one) and none on the
+    current scroll position.
+    """
+    if not dpg.does_item_exist("repos_container") or not entries:
+        return
+    header_y = _row_y(header_tag)
+    first_y = _row_y(entries[0][0])
+    try:
+        maximum = float(dpg.get_y_scroll_max("repos_container"))
+        current = float(dpg.get_y_scroll("repos_container"))
+    except Exception:
+        maximum, current = 0.0, 0.0
+    if header_y is None or first_y is None:
+        if _debug_mode:
+            print(f"[typeahead] no rect header_y={header_y} first_y={first_y}",
+                  flush=True)
+        return
+    target = max(0.0, min(header_y - first_y, maximum))
+    if _debug_mode:
+        print(f"[typeahead] header_y={header_y} first_y={first_y} "
+              f"cur={current} max={maximum} target={target}", flush=True)
+    if header_tag != entries[0][0] and header_y == first_y:
+        # Every row reports the same y -- this dearpygui build does not track a
+        # rect for collapsing headers, so there is nothing to compute from.
+        # Fall back to focusing the row: ImGui scrolls a focused item into view.
+        if _debug_mode:
+            print("[typeahead] rects flat, falling back to focus_item", flush=True)
+        try:
+            dpg.focus_item(header_tag)
+        except Exception:
+            pass
+        return
+    try:
+        dpg.set_y_scroll("repos_container", target,
+                         when=dpg.mvSetScrollFlags_Both)
+    except Exception:
+        # Older dearpygui builds without the `when` flag.
+        dpg.set_y_scroll("repos_container", target)
+
+
+def _typeahead_render():
+    """Repaint the toolbar hint showing the current buffer."""
+    if not dpg.does_item_exist("typeahead_label"):
+        return
+    if not app.typeahead_buf:
+        dpg.set_value("typeahead_label", "")
+        return
+    suffix = "  (no match)" if app.typeahead_miss else ""
+    dpg.set_value("typeahead_label", f"> {app.typeahead_buf}{suffix}")
+    dpg.configure_item("typeahead_label",
+                       color=COL_RED if app.typeahead_miss else COL_YELLOW)
+
+
+def _typeahead_reset():
+    app.typeahead_buf = ""
+    app.typeahead_miss = False
+    _typeahead_render()
+
+
+def _typeahead_apply():
+    """Jump to the first row matching the buffer; mark a miss when there is none."""
+    entries = _typeahead_entries()
+    header_tag, name = find_typeahead_match(entries, app.typeahead_buf)
+    app.typeahead_miss = header_tag is None
+    if _debug_mode:
+        print(f"[typeahead] buf={app.typeahead_buf!r} rows={len(entries)} "
+              f"match={name!r} tag={header_tag}", flush=True)
+    if header_tag is not None:
+        _scroll_header_into_view(header_tag, entries)
+    _typeahead_render()
+
+
+def cb_typeahead_key(sender, app_data, user_data):
+    """Global key handler driving the repo list type-ahead.
+
+    Letters/digits/'-' extend the buffer, Backspace trims it, Escape clears it.
+    An idle gap longer than TYPEAHEAD_TIMEOUT also clears it (see the render
+    loop), so a later burst starts a fresh search instead of appending.
+    """
+    if _typeahead_blocked():
+        return
+    key = app_data
+    escape = getattr(dpg, "mvKey_Escape", None)
+    back = getattr(dpg, "mvKey_Back", None)
+    if escape is not None and key == escape:
+        _typeahead_reset()
+        return
+    now = time.time()
+    if back is not None and key == back:
+        if not app.typeahead_buf:
+            return
+        app.typeahead_buf = app.typeahead_buf[:-1]
+        app.typeahead_ts = now
+        if not app.typeahead_buf:
+            _typeahead_reset()
+        else:
+            _typeahead_apply()
+        return
+    ch = _typeahead_keymap().get(key)
+    if ch is None:
+        return
+    if app.typeahead_buf and now - app.typeahead_ts > TYPEAHEAD_TIMEOUT:
+        app.typeahead_buf = ""
+        app.typeahead_miss = False
+    app.typeahead_buf += ch
+    app.typeahead_ts = now
+    _typeahead_apply()
+
+
 def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
                      preserve_open=False, pending=None):
     """Rebuild repo sections from poll results.
@@ -5009,6 +5255,11 @@ def main():
             with dpg.tooltip(dpg.last_item()):
                 dpg.add_text("Show only recently modified")
             dpg.add_text("", tag="hidden_count_label", color=COL_DIM)
+            # Type-ahead buffer readout (see cb_typeahead_key)
+            dpg.add_text("", tag="typeahead_label", color=COL_YELLOW)
+            with dpg.tooltip(dpg.last_item()):
+                dpg.add_text("Type a repo name to jump to it "
+                             "(Backspace trims, Esc clears)")
 
         dpg.add_separator()
 
@@ -5031,6 +5282,11 @@ def main():
             dpg.add_button(label="Reset", callback=cb_model_reset)
 
     dpg.set_primary_window("primary", True)
+
+    # Repo list type-ahead: a global key handler, so it works wherever the
+    # click last landed in the main window.
+    with dpg.handler_registry():
+        dpg.add_key_press_handler(callback=cb_typeahead_key)
 
     dpg.setup_dearpygui()
     dpg.show_viewport()
@@ -5100,6 +5356,11 @@ def main():
             _hide_window()
 
         now = time.time()
+
+        # Expire a stale type-ahead buffer so the next burst starts fresh.
+        if app.typeahead_buf and now - app.typeahead_ts > TYPEAHEAD_TIMEOUT:
+            _typeahead_reset()
+
         has_force_active = any(v == "active" for v in app.repo_overrides.values())
         if (not app.paused or has_force_active) and now - app.last_poll >= app.poll_interval:
             trigger_poll()
