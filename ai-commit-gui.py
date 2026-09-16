@@ -85,6 +85,11 @@ from ai_commit_core import (
     do_commit_and_push,
     describe_empty_diff,
     do_pull,
+    do_pull_with_autostash,
+    is_pull_blocked_by_local_changes,
+    parse_pull_blocked_paths,
+    PULL_AUTOSTASH_CONFLICT,
+    PULL_AUTOSTASH_RESTORED,
     is_push_rule_block,
     is_secret_push_block,
     needs_upstream_setup,
@@ -1194,20 +1199,37 @@ def bg_generate_message(repo_name):
         ui_queue.put(("gen_result", repo_name, "", f"Unexpected error: {exc}"))
 
 
-def bg_pull(repo_name):
-    """Pull latest changes for a repo. Posts result to ui_queue."""
+def bg_pull(repo_name, stash_confirmed=False):
+    """Pull latest changes for a repo. Posts result to ui_queue.
+
+    When git refuses because locally-modified files would be overwritten, this
+    does NOT stash on its own -- it posts 'pull_needs_stash' and returns, so the
+    user confirms first. The confirm button calls back in with
+    ``stash_confirmed=True``, which runs the stash -> pull -> restore sequence.
+    """
     rs = app.repos.get(repo_name)
     if not rs:
         return
     try:
         activity_log.log_event("Pull", repo=repo_name)
+        if stash_confirmed:
+            def _progress(text):
+                ui_queue.put(("pull_all_status", repo_name, text, COL_YELLOW))
+            ok, detail, outcome = do_pull_with_autostash(
+                rs.path, progress=_progress)
+            ui_queue.put(("pull_result", repo_name, ok, detail, outcome))
+            return
         ok, detail = do_pull(rs.path)
-        ui_queue.put(("pull_result", repo_name, ok, detail))
+        if not ok and is_pull_blocked_by_local_changes(detail):
+            ui_queue.put(("pull_needs_stash", repo_name,
+                          parse_pull_blocked_paths(detail)))
+            return
+        ui_queue.put(("pull_result", repo_name, ok, detail, None))
     except Exception as exc:
-        ui_queue.put(("pull_result", repo_name, False, str(exc)))
+        ui_queue.put(("pull_result", repo_name, False, str(exc), None))
 
 
-def bg_pull_all(repo_keys):
+def bg_pull_all(repo_keys, stash_confirmed=False):
     """Pull a batch of repos one at a time, refreshing each as it lands.
 
     Deliberately sequential on a SINGLE worker rather than one
@@ -1220,25 +1242,55 @@ def bg_pull_all(repo_keys):
     A failure posts a *sticky* error rather than a plain status line: the
     next repo's refresh rebuilds the whole list (see the
     `single_repo_refresh` handler) and would wipe a plain line.
+
+    Repos blocked by uncommitted local changes are collected and offered as ONE
+    dialog after the batch drains, never per repo mid-loop: this runs on a
+    single worker, so a modal raised in the middle would stall every remaining
+    pull behind it waiting for a click.
     """
+    blocked = []
     for repo_key in repo_keys:
         rs = app.repos.get(repo_key)
         if not rs:
             continue
         ui_queue.put(("pull_all_status", repo_key, "Pulling...", COL_YELLOW))
+        outcome = None
         try:
             activity_log.log_event("Pull", repo=repo_key)
-            ok, detail = do_pull(rs.path)
+            if stash_confirmed:
+                def _progress(text, _k=repo_key):
+                    ui_queue.put(("pull_all_status", _k, text, COL_YELLOW))
+                ok, detail, outcome = do_pull_with_autostash(
+                    rs.path, progress=_progress)
+            else:
+                ok, detail = do_pull(rs.path)
         except Exception as exc:
             ok, detail = False, str(exc)
         if ok:
-            ui_queue.put(("pull_all_status", repo_key,
-                          "Pulled successfully!", COL_GREEN))
+            if outcome == PULL_AUTOSTASH_CONFLICT:
+                # Pulled, but the restore conflicted -- sticky, not a passing
+                # status line, or the next repo's refresh would wipe it.
+                ui_queue.put(("pull_all_failed", repo_key, detail))
+            else:
+                ui_queue.put(("pull_all_status", repo_key,
+                              _pull_success_text(outcome), COL_GREEN))
             # Inline, not executor.submit -- stay on this one worker so the
             # pulls stay serialized behind their own refreshes.
             bg_refresh_single_repo(repo_key)
         else:
+            if not stash_confirmed and is_pull_blocked_by_local_changes(detail):
+                blocked.append((repo_key, parse_pull_blocked_paths(detail)))
             ui_queue.put(("pull_all_failed", repo_key, detail))
+
+    if blocked:
+        ui_queue.put(("pull_all_needs_stash", blocked))
+
+
+def _pull_success_text(outcome):
+    """Status line for a pull that landed, given its autostash outcome."""
+    if outcome == PULL_AUTOSTASH_RESTORED:
+        return "Pulled and restored your changes"
+    return "Pulled successfully!"
 
 
 def bg_preview_pull(repo_name):
@@ -2343,6 +2395,126 @@ def _show_pull_all_prompt():
                 user_data=win_tag,
             )
     return win_tag
+
+
+def _show_pull_stash_prompt(repo_key, paths):
+    """Offer to stash, pull and restore after git refused to overwrite *paths*.
+
+    Raised from the `pull_needs_stash` handler when a single-repo pull hit
+    "Your local changes to the following files would be overwritten by merge".
+    Returns the window tag so it can be rendered in tests.
+    """
+    win_tag = dpg.generate_uuid()
+    with dpg.window(
+        label="Pull blocked -- stash local changes?",
+        tag=win_tag,
+        width=480, height=210,
+        no_collapse=True, modal=True,
+        on_close=lambda s, a, u: (
+            dpg.delete_item(s) if dpg.does_item_exist(s) else None
+        ),
+    ):
+        dpg.add_text(
+            f"{len(paths)} local change(s) would be overwritten by the pull.",
+            color=COL_YELLOW, wrap=440,
+        )
+        for path in paths[:8]:
+            dpg.add_text(f"   {path}", color=COL_DIM)
+        if len(paths) > 8:
+            dpg.add_text(f"   +{len(paths) - 8} more", color=COL_DIM)
+        dpg.add_spacer(height=4)
+        dpg.add_text(
+            "They'll be stashed (including untracked files), pulled, then "
+            "restored automatically. If restoring conflicts, the stash is "
+            "kept for you to resolve.",
+            color=COL_DIM, wrap=440,
+        )
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True):
+            proceed_btn = dpg.add_button(
+                label="Stash, pull & restore",
+                callback=lambda s, a, u: (
+                    dpg.delete_item(u[1]) if dpg.does_item_exist(u[1]) else None,
+                    executor.submit(bg_pull, u[0], True),
+                ),
+                user_data=(repo_key, win_tag),
+            )
+            dpg.bind_item_theme(proceed_btn, green_btn_theme)
+            dpg.add_button(
+                label="Cancel",
+                callback=lambda s, a, u: (
+                    dpg.delete_item(u) if dpg.does_item_exist(u) else None
+                ),
+                user_data=win_tag,
+            )
+    return win_tag
+
+
+def _show_pull_all_stash_prompt(blocked):
+    """One dialog for every repo a bulk pull couldn't do without stashing.
+
+    *blocked* is a list of ``(repo_key, [blocked paths])``. Raised once after
+    the whole batch drains, never mid-loop: `bg_pull_all` runs on a single
+    worker, so a modal raised between repos would stall the rest of the batch
+    behind a click. Returns the window tag so it can be rendered in tests.
+    """
+    win_tag = dpg.generate_uuid()
+    with dpg.window(
+        label=f"{len(blocked)} repo(s) blocked by local changes",
+        tag=win_tag,
+        width=520, height=260,
+        no_collapse=True, modal=True,
+        on_close=lambda s, a, u: (
+            dpg.delete_item(s) if dpg.does_item_exist(s) else None
+        ),
+    ):
+        dpg.add_text(
+            "These repos couldn't pull -- local changes would be overwritten:",
+            color=COL_YELLOW, wrap=480,
+        )
+        for repo_key, paths in blocked[:8]:
+            rs = app.repos.get(repo_key)
+            name = rs.name if rs else Path(repo_key).name
+            shown = ", ".join(paths[:3])
+            if len(paths) > 3:
+                shown += f", +{len(paths) - 3} more"
+            dpg.add_text(f"   {name}    {shown}", color=COL_DIM, wrap=480)
+        if len(blocked) > 8:
+            dpg.add_text(f"   +{len(blocked) - 8} more repo(s)", color=COL_DIM)
+        dpg.add_spacer(height=4)
+        dpg.add_text(
+            "Stash each (including untracked files), pull, then restore "
+            "automatically. A repo whose restore conflicts keeps its stash.",
+            color=COL_DIM, wrap=480,
+        )
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True):
+            proceed_btn = dpg.add_button(
+                label=f"Stash & pull {len(blocked)}",
+                callback=_cb_confirm_pull_all_stash,
+                user_data=([k for k, _paths in blocked], win_tag),
+            )
+            dpg.bind_item_theme(proceed_btn, green_btn_theme)
+            dpg.add_button(
+                label="Cancel",
+                callback=lambda s, a, u: (
+                    dpg.delete_item(u) if dpg.does_item_exist(u) else None
+                ),
+                user_data=win_tag,
+            )
+    return win_tag
+
+
+def _cb_confirm_pull_all_stash(sender, app_data, user_data):
+    """User confirmed the bulk stash-and-pull -- hand it to one worker."""
+    repo_keys, win_tag = user_data
+    if dpg.does_item_exist(win_tag):
+        dpg.delete_item(win_tag)
+    # Re-validate: the dialog can sit open across a poll cycle, so a repo may
+    # have been unwatched since the batch ran.
+    still_watched = [k for k in repo_keys if k in app.repos]
+    if still_watched:
+        executor.submit(bg_pull_all, still_watched, True)
 
 
 def _cb_confirm_pull_all(sender, app_data, user_data):
@@ -4708,20 +4880,39 @@ def process_queue():
                             )
 
         elif kind == "pull_result":
-            _, repo_name, ok, detail = msg
+            _, repo_name, ok, detail, outcome = msg
             rs = app.repos.get(repo_name)
+            # A conflicted restore has to survive the refresh rebuild that
+            # follows it, so it goes through the sticky error path instead of
+            # the status line.
+            if rs and ok and outcome == PULL_AUTOSTASH_CONFLICT:
+                rs.gen_status = GenStatus.ERROR
+                rs.error_message = detail
+                update_repo_status(rs)
             # The status row may have been torn down by a rebuild between the
             # pull starting and finishing -- writing to a deleted item id
             # crashes Dear PyGui, it does not just no-op.
-            if rs and rs.status_tag and dpg.does_item_exist(rs.status_tag):
+            elif rs and rs.status_tag and dpg.does_item_exist(rs.status_tag):
                 if ok:
-                    dpg.set_value(rs.status_tag, "Pulled successfully!")
+                    dpg.set_value(rs.status_tag, _pull_success_text(outcome))
                     dpg.configure_item(rs.status_tag, color=COL_GREEN)
                 else:
                     dpg.set_value(rs.status_tag, f"Pull failed: {detail}")
                     dpg.configure_item(rs.status_tag, color=COL_RED)
             if rs and ok:
                 executor.submit(bg_refresh_single_repo, repo_name)
+
+        elif kind == "pull_needs_stash":
+            _, repo_key, paths = msg
+            if repo_key in app.repos:
+                _show_pull_stash_prompt(repo_key, paths)
+
+        elif kind == "pull_all_needs_stash":
+            _, blocked = msg
+            # Repos can disappear between the batch finishing and the click.
+            blocked = [(k, p) for k, p in blocked if k in app.repos]
+            if blocked:
+                _show_pull_all_stash_prompt(blocked)
 
         elif kind == "pull_all_status":
             _, repo_key, text, color = msg

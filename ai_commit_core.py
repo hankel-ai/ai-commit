@@ -993,6 +993,162 @@ def do_pull(cwd):
     return True, stdout.strip()
 
 
+# git refuses a merge that would clobber uncommitted work, listing the files
+# between one of these headers and a trailer line. Two headers because tracked
+# and untracked files are reported separately (and a single pull can hit both).
+_PULL_BLOCKED_HEADERS = (
+    "Your local changes to the following files would be overwritten by merge:",
+    "The following untracked working tree files would be overwritten by merge:",
+)
+_PULL_BLOCKED_TRAILERS = (
+    "Please commit your changes or stash them before you merge.",
+    "Please move or remove them before you merge.",
+    "Aborting",
+)
+
+# Outcomes of do_pull_with_autostash, so callers branch on a constant rather
+# than sniffing the human-readable detail string.
+PULL_AUTOSTASH_RESTORED = "restored"      # stashed, pulled, popped cleanly
+PULL_AUTOSTASH_CONFLICT = "conflict"      # pulled, but the pop conflicted -- stash KEPT
+PULL_AUTOSTASH_NOTHING = "nothing"        # tree was clean, plain pull
+PULL_AUTOSTASH_ROLLED_BACK = "rolled_back"  # pull failed, stash popped back
+PULL_AUTOSTASH_STASH_FAILED = "stash_failed"
+PULL_AUTOSTASH_DETACHED = "detached"
+PULL_AUTOSTASH_STATUS_FAILED = "status_failed"
+
+
+def is_pull_blocked_by_local_changes(text):
+    """True if *text* is git refusing to pull over uncommitted local work.
+
+    Matches the refusal only -- an auth failure, a missing remote, or a real
+    merge conflict must NOT offer to stash, because stashing would not help.
+    Callers pass ``do_pull``'s detail string, which already carries a
+    ``git pull failed: `` prefix, so this is a substring test.
+    """
+    if not text:
+        return False
+    return any(header in text for header in _PULL_BLOCKED_HEADERS)
+
+
+def parse_pull_blocked_paths(text):
+    """Return the file paths git listed as blocking the pull, in order.
+
+    Each header is followed by one tab-indented path per line until a trailer
+    line. Both blocks are collected when a pull hits tracked *and* untracked
+    files. Returns ``[]`` for any other error text.
+    """
+    paths = []
+    collecting = False
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if any(header in line for header in _PULL_BLOCKED_HEADERS):
+            collecting = True
+            continue
+        if not collecting:
+            continue
+        if not line or any(line.startswith(t) for t in _PULL_BLOCKED_TRAILERS):
+            collecting = False
+            continue
+        paths.append(line)
+    return paths
+
+
+def autostash_marker(branch):
+    """The stash message ai-commit tags its own stashes with.
+
+    Single source of truth shared by the Switch Branch and pull autostash
+    paths, and by :func:`find_autostash_ref`, which looks for exactly this.
+    """
+    return f"ai-commit-autostash:{branch}"
+
+
+def do_pull_with_autostash(cwd, progress=None):
+    """Stash uncommitted work, pull, then restore it.
+
+    Returns ``(ok, detail, outcome)`` where *outcome* is one of the
+    ``PULL_AUTOSTASH_*`` constants. ``ok`` reports whether the **pull**
+    succeeded -- a pull that landed but whose restore conflicted is still
+    ``True``, with ``outcome == PULL_AUTOSTASH_CONFLICT`` and the stash left in
+    place for the user to resolve.
+
+    ``progress`` is an optional callable given short status strings
+    (``"Stashing..."``, ``"Pulling..."``, ``"Restoring..."``) so a UI can show
+    where the sequence is.
+    """
+    def _say(text):
+        if progress:
+            progress(text)
+
+    branch = get_current_branch(cwd)
+    if not branch or branch == "HEAD":
+        # No branch means no marker to tag the stash with, so the restore step
+        # could not find its own stash again. Refuse rather than guess.
+        return (False, "Detached HEAD -- check out a branch before pulling.",
+                PULL_AUTOSTASH_DETACHED)
+
+    ok, entries = read_status(cwd)
+    if not ok:
+        # A failed status is "unknown", never "clean" -- treating it as clean
+        # would pull straight over uncommitted work.
+        return (False, "Couldn't read the working tree (git busy). Try again.",
+                PULL_AUTOSTASH_STATUS_FAILED)
+
+    if not entries:
+        pulled, detail = do_pull(cwd)
+        return pulled, detail, PULL_AUTOSTASH_NOTHING
+
+    _say("Stashing...")
+    marker = autostash_marker(branch)
+    rc, _, err = run_git(
+        ["stash", "push", "--include-untracked", "-m", marker], cwd=cwd)
+    if rc != 0:
+        return False, f"Stash failed: {err.strip()}", PULL_AUTOSTASH_STASH_FAILED
+
+    # `git stash push` exits 0 with "No local changes to save" when it saved
+    # nothing (e.g. only ignored files were dirty). Confirm a stash of OURS
+    # exists before anything later tries to pop one -- a bare `stash pop` would
+    # otherwise restore a *manual* stash sitting on top.
+    rc, stash_out, _ = run_git(["stash", "list"], cwd=cwd)
+    ref = find_autostash_ref(stash_out, branch) if rc == 0 else None
+
+    _say("Pulling...")
+    pulled, detail = do_pull(cwd)
+    if not pulled:
+        if ref:
+            run_git(["stash", "pop", ref], cwd=cwd)
+        return False, detail, PULL_AUTOSTASH_ROLLED_BACK
+
+    if not ref:
+        return True, detail, PULL_AUTOSTASH_NOTHING
+
+    _say("Restoring...")
+    # Re-resolve: the pull may have run its own autostash, shifting indices.
+    rc, stash_out, _ = run_git(["stash", "list"], cwd=cwd)
+    ref = find_autostash_ref(stash_out, branch) if rc == 0 else ref
+
+    rc_p, _, err_p = run_git(["stash", "pop", ref], cwd=cwd)
+    if rc_p == 0:
+        return True, detail, PULL_AUTOSTASH_RESTORED
+
+    # A conflicting pop leaves markers in the tree AND keeps the stash.
+    conflicted = ", ".join(parse_stash_pop_conflicts(err_p)) or "the working tree"
+    note = (f"Pulled, but restoring your changes conflicted in {conflicted}. "
+            f"Your stash is kept ({ref}) -- resolve, then "
+            f"`git stash drop {ref}`.")
+    return True, note, PULL_AUTOSTASH_CONFLICT
+
+
+def parse_stash_pop_conflicts(text):
+    """Return the paths named in ``CONFLICT (...): Merge conflict in <path>``."""
+    paths = []
+    for line in (text or "").splitlines():
+        marker = "Merge conflict in "
+        idx = line.find(marker)
+        if idx != -1:
+            paths.append(line[idx + len(marker):].strip())
+    return paths
+
+
 def get_diff(cwd):
     """Build a combined diff string: staged + unstaged changes and untracked file contents."""
     parts = []

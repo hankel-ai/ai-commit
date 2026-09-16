@@ -68,6 +68,7 @@ python ai-commit-gui.py --model mistral --poll 15
 - **Always-on-top**: compact window stays visible while you work
 - **Drag-to-move**: custom title bar with drag support
 - **Type to jump**: start typing a repo's name and the list scrolls straight to it (Backspace trims, Esc clears; the buffer resets after ~1.5s of no typing). Works the same whether repos are collapsed or expanded, and matches on `-`/`_` interchangeably
+- **Pull autostash**: when a pull is refused because your uncommitted edits would be overwritten, ai-commit offers to stash them (untracked files included), pull, and restore them automatically. Works for a single repo and for Pull All, which collects every blocked repo into one prompt. If restoring conflicts, the stash is kept and named so you can resolve it by hand
 - **GitHub Actions viewer**: after pushing, automatically detects any triggered workflow runs and opens a live status window with per-step logs, run cancellation, and direct GitHub links
 - **Git proxy (LAN)**: turns ai-commit into a read-only git remote for every repo it watches, so other machines on your network can clone and pull without GitHub and without copying folders around. Off by default -- see below
 - **Init non-git folders**: with "Show non-git folders" enabled, any watched folder that isn't a git repo gets an `Init` button. This includes the folder you added directly (when it has no git sub-folders), and non-git siblings of existing repos inside a container folder
