@@ -104,6 +104,10 @@ from ai_commit_core import (
     get_commit_patch,
     get_diff,
     get_github_account,
+    gitlab_remote_candidates,
+    build_gitlab_remote_url,
+    validate_gitlab_target,
+    suggest_gitlab_project_name,
     get_head_sha,
     get_incoming_changes,
     get_repo_visibility,
@@ -1607,8 +1611,60 @@ def bg_create_remote(repo_name, account, visibility):
         ui_queue.put(("create_remote_result", repo_name, False, str(exc)))
 
 
+def bg_create_gitlab_remote(repo_name, url):
+    """Create a GitLab project by pushing to a path that doesn't exist yet.
+
+    GitLab push-to-create makes a PRIVATE project on the first push, using
+    whatever credential helper already serves the user's other GitLab repos.
+    On any failure the origin we added is removed again, so the repo is back
+    to "no remote" and Create-Remote stays offered.
+    """
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    cwd = str(rs.path)
+    try:
+        rc, _, err = run_git(["remote", "add", "origin", url], cwd=cwd)
+        if rc != 0:
+            # Typically "remote origin already exists" -- not ours to remove.
+            ui_queue.put(("create_remote_result", repo_name, False,
+                          err.strip() or "git remote add failed"))
+            return
+        rc, out, err = run_git(["push", "-u", "origin", "HEAD"], cwd=cwd)
+        if rc != 0:
+            run_git(["remote", "remove", "origin"], cwd=cwd)
+            ui_queue.put(("create_remote_result", repo_name, False,
+                          remote_reject_reason(err or out) or "git push failed"))
+            return
+        ui_queue.put(("create_remote_result", repo_name, True, get_remote_url(cwd)))
+    except Exception as exc:
+        ui_queue.put(("create_remote_result", repo_name, False, str(exc)))
+
+
+def _collect_gitlab_candidates():
+    """Rank GitLab host/namespace pairs from every watched repo's origin.
+
+    Reads the RAW origin URL (``rs.remote_url`` is normalized to HTTPS), so a
+    repo cloned over SSH yields an SSH prefix. Hidden idle repos are still in
+    ``app.repos``, so they count too.
+    """
+    urls = []
+    for rs in list(app.repos.values()):
+        normalized = getattr(rs, "remote_url", "") or ""
+        if not normalized or "github.com" in normalized.lower():
+            continue
+        rc, out, _ = run_git(["remote", "get-url", "origin"], cwd=str(rs.path))
+        if rc == 0 and out.strip():
+            urls.append(out.strip())
+    return gitlab_remote_candidates(urls)
+
+
 def bg_detect_gh_accounts(repo_key, click_pos=(0, 0)):
-    """Detect authenticated GitHub accounts. Posts result to ui_queue."""
+    """Detect GitHub accounts + GitLab prefill candidates. Posts to ui_queue."""
+    try:
+        gitlab_candidates = _collect_gitlab_candidates()
+    except Exception:
+        gitlab_candidates = []
     try:
         kwargs = {}
         if os.name == "nt":
@@ -1632,11 +1688,14 @@ def bg_detect_gh_accounts(repo_key, click_pos=(0, 0)):
                     active = accounts[-1]
         if not active and accounts:
             active = accounts[0]
-        ui_queue.put(("gh_accounts_result", repo_key, accounts, active, click_pos))
+        ui_queue.put(("gh_accounts_result", repo_key, accounts, active, click_pos,
+                      gitlab_candidates))
     except FileNotFoundError:
-        ui_queue.put(("gh_accounts_result", repo_key, [], "", click_pos))
+        ui_queue.put(("gh_accounts_result", repo_key, [], "", click_pos,
+                      gitlab_candidates))
     except Exception:
-        ui_queue.put(("gh_accounts_result", repo_key, [], "", click_pos))
+        ui_queue.put(("gh_accounts_result", repo_key, [], "", click_pos,
+                      gitlab_candidates))
 
 
 # ---------------------------------------------------------------------------
@@ -2120,14 +2179,20 @@ def cb_create_remote(sender, app_data, user_data):
         return
     # Capture click position so the popup opens nearby.
     click_pos = dpg.get_mouse_pos()
-    dpg.set_value(rs.status_tag, "Detecting GitHub accounts...")
+    dpg.set_value(rs.status_tag, "Detecting accounts...")
     dpg.configure_item(rs.status_tag, color=COL_YELLOW)
     executor.submit(bg_detect_gh_accounts, repo_key, click_pos)
 
 
 def _show_create_remote_popup(repo_key, accounts, active_account,
-                              click_pos=(0, 0)):
-    """Show popup dialog for creating a GitHub remote."""
+                              click_pos=(0, 0), gitlab_candidates=None):
+    """Show popup dialog for creating a GitHub repo or a GitLab project.
+
+    *gitlab_candidates* comes from ``gitlab_remote_candidates`` over the
+    watched repos' origins. When it's empty the popup is the plain GitHub one;
+    otherwise a GitHub/GitLab switch appears, defaulting to GitLab when gh has
+    no accounts (a work machine that only talks to GitLab).
+    """
     rs = app.repos.get(repo_key)
     if not rs:
         return
@@ -2135,18 +2200,63 @@ def _show_create_remote_popup(repo_key, accounts, active_account,
     win_tag = dpg.generate_uuid()
     combo_tag = dpg.generate_uuid()
     radio_tag = dpg.generate_uuid()
+    create_tag = dpg.generate_uuid()
+    gh_group = dpg.generate_uuid()
+    gl_group = dpg.generate_uuid()
+    provider_tag = dpg.generate_uuid()
+    gl = {
+        "host": dpg.generate_uuid(), "host_pick": dpg.generate_uuid(),
+        "ns": dpg.generate_uuid(), "ns_pick": dpg.generate_uuid(),
+        "project": dpg.generate_uuid(), "preview": dpg.generate_uuid(),
+        "error": dpg.generate_uuid(),
+    }
+    gitlab_candidates = gitlab_candidates or []
+    ns_by_host = {c["prefix"]: c["namespaces"] for c in gitlab_candidates}
 
     folder_name = rs.path.name
     default_acct = (active_account if active_account in accounts
                     else accounts[0] if accounts else "")
+    provider = "GitLab" if (gitlab_candidates and not accounts) else "GitHub"
+
+    def _refresh_state(*_):
+        """Re-derive preview/error text and the Create button's enabled state."""
+        is_gl = bool(gitlab_candidates) and dpg.get_value(provider_tag) == "GitLab"
+        if gitlab_candidates:
+            dpg.configure_item(gh_group, show=not is_gl)
+            dpg.configure_item(gl_group, show=is_gl)
+        if is_gl:
+            host = dpg.get_value(gl["host"]) or ""
+            ns = dpg.get_value(gl["ns"]) or ""
+            project = dpg.get_value(gl["project"]) or ""
+            err = validate_gitlab_target(host, ns, project)
+            dpg.set_value(gl["preview"], "" if err else
+                          build_gitlab_remote_url(host, ns, project))
+            dpg.set_value(gl["error"], err)
+            dpg.configure_item(create_tag, enabled=not err)
+        else:
+            dpg.configure_item(create_tag, enabled=bool(accounts))
+
+    def _pick_host(sender, value, *_):
+        dpg.set_value(gl["host"], value)
+        namespaces = ns_by_host.get(value, [])
+        dpg.configure_item(gl["ns_pick"], items=namespaces)
+        if namespaces:
+            dpg.set_value(gl["ns_pick"], namespaces[0])
+            dpg.set_value(gl["ns"], namespaces[0])
+        _refresh_state()
+
+    def _pick_ns(sender, value, *_):
+        dpg.set_value(gl["ns"], value)
+        _refresh_state()
 
     # Position the popup near where the user clicked.
-    pop_w, pop_h = 400, 220
+    pop_w = 460
+    pop_h = 340 if gitlab_candidates else 220
     px = max(0, int(click_pos[0]) - pop_w // 2)
     py = max(0, int(click_pos[1]))
 
     with dpg.window(
-        label=f"Create GitHub Repo \u2014 {folder_name}",
+        label=f"Create Remote Repo — {folder_name}",
         tag=win_tag,
         width=pop_w, height=pop_h,
         pos=(px, py),
@@ -2155,39 +2265,82 @@ def _show_create_remote_popup(repo_key, accounts, active_account,
             dpg.delete_item(s) if dpg.does_item_exist(s) else None
         ),
     ):
-        with dpg.group(horizontal=True):
-            dpg.add_text("Account:", color=COL_ACCENT)
-            add_btn = dpg.add_button(
-                label="+ Add Account",
-                callback=_cb_add_gh_account,
-                user_data=win_tag,
+        if gitlab_candidates:
+            with dpg.group(horizontal=True):
+                dpg.add_text("Provider:", color=COL_ACCENT)
+                dpg.add_radio_button(
+                    ["GitHub", "GitLab"], tag=provider_tag,
+                    default_value=provider, horizontal=True,
+                    callback=_refresh_state,
+                )
+            dpg.add_spacer(height=4)
+
+        with dpg.group(tag=gh_group, show=provider == "GitHub"):
+            with dpg.group(horizontal=True):
+                dpg.add_text("Account:", color=COL_ACCENT)
+                add_btn = dpg.add_button(
+                    label="+ Add Account",
+                    callback=_cb_add_gh_account,
+                    user_data=win_tag,
+                )
+                dpg.bind_item_theme(add_btn, link_btn_theme)
+            if accounts:
+                dpg.add_combo(
+                    accounts, tag=combo_tag,
+                    default_value=default_acct, width=-1,
+                )
+            else:
+                dpg.add_text("No accounts found - add one above.",
+                             color=COL_DIM)
+                dpg.add_combo([], tag=combo_tag, width=-1)
+            dpg.add_spacer(height=6)
+            dpg.add_text("Visibility:", color=COL_ACCENT)
+            dpg.add_radio_button(
+                ["Private", "Public"], tag=radio_tag,
+                default_value="Private", horizontal=True,
             )
-            dpg.bind_item_theme(add_btn, link_btn_theme)
-        if accounts:
-            dpg.add_combo(
-                accounts, tag=combo_tag,
-                default_value=default_acct, width=-1,
-            )
-        else:
-            dpg.add_text("No accounts found - add one above.",
-                         color=COL_DIM)
-            dpg.add_combo([], tag=combo_tag, width=-1)
-        dpg.add_spacer(height=6)
-        dpg.add_text("Visibility:", color=COL_ACCENT)
-        dpg.add_radio_button(
-            ["Private", "Public"], tag=radio_tag,
-            default_value="Private", horizontal=True,
-        )
+
+        if gitlab_candidates:
+            top_host = gitlab_candidates[0]["prefix"]
+            top_ns = gitlab_candidates[0]["namespaces"]
+            top_ns0 = top_ns[0] if top_ns else ""
+            with dpg.group(tag=gl_group, show=provider == "GitLab"):
+                # Editable field + arrow-only combo of known values beside it:
+                # a Dear PyGui combo can't take typed text.
+                dpg.add_text("Host:", color=COL_ACCENT)
+                with dpg.group(horizontal=True):
+                    dpg.add_input_text(tag=gl["host"], default_value=top_host,
+                                       width=-40, callback=_refresh_state)
+                    dpg.add_combo([c["prefix"] for c in gitlab_candidates],
+                                  tag=gl["host_pick"], default_value=top_host,
+                                  no_preview=True, width=30, callback=_pick_host)
+                dpg.add_text("Namespace:", color=COL_ACCENT)
+                with dpg.group(horizontal=True):
+                    dpg.add_input_text(tag=gl["ns"], default_value=top_ns0,
+                                       width=-40, callback=_refresh_state)
+                    dpg.add_combo(top_ns, tag=gl["ns_pick"],
+                                  default_value=top_ns0,
+                                  no_preview=True, width=30, callback=_pick_ns)
+                dpg.add_text("Project:", color=COL_ACCENT)
+                dpg.add_input_text(
+                    tag=gl["project"],
+                    default_value=suggest_gitlab_project_name(folder_name),
+                    width=-1, callback=_refresh_state)
+                dpg.add_text("", tag=gl["preview"], color=COL_DIM)
+                dpg.add_text("", tag=gl["error"], color=COL_RED)
+                dpg.add_text("Created PRIVATE via push-to-create "
+                             "(uses your existing GitLab login).",
+                             color=COL_DIM)
+
         dpg.add_spacer(height=10)
         with dpg.group(horizontal=True):
             create_btn = dpg.add_button(
-                label="Create",
+                label="Create", tag=create_tag,
                 callback=_cb_confirm_create_remote,
-                user_data=(repo_key, win_tag, combo_tag, radio_tag),
+                user_data=(repo_key, win_tag, combo_tag, radio_tag,
+                           provider_tag if gitlab_candidates else None, gl),
             )
             dpg.bind_item_theme(create_btn, green_btn_theme)
-            if not accounts:
-                dpg.configure_item(create_btn, enabled=False)
             dpg.add_button(
                 label="Cancel",
                 user_data=win_tag,
@@ -2195,6 +2348,7 @@ def _show_create_remote_popup(repo_key, accounts, active_account,
                     dpg.delete_item(u) if dpg.does_item_exist(u) else None
                 ),
             )
+    _refresh_state()
 
 
 def _cb_add_gh_account(sender, app_data, user_data):
@@ -2222,17 +2376,33 @@ def _cb_add_gh_account(sender, app_data, user_data):
 
 def _cb_confirm_create_remote(sender, app_data, user_data):
     """User confirmed create-remote from the popup."""
-    repo_key, win_tag, combo_tag, radio_tag = user_data
+    repo_key, win_tag, combo_tag, radio_tag, provider_tag, gl = user_data
 
-    account = dpg.get_value(combo_tag)
-    visibility_label = dpg.get_value(radio_tag)
-    visibility = "private" if visibility_label == "Private" else "public"
+    use_gitlab = bool(provider_tag) and dpg.get_value(provider_tag) == "GitLab"
+    if use_gitlab:
+        host = dpg.get_value(gl["host"]) or ""
+        ns = dpg.get_value(gl["ns"]) or ""
+        project = dpg.get_value(gl["project"]) or ""
+        err = validate_gitlab_target(host, ns, project)
+        if err:
+            dpg.set_value(gl["error"], err)
+            return
+        url = build_gitlab_remote_url(host, ns, project)
+    else:
+        account = dpg.get_value(combo_tag)
+        visibility_label = dpg.get_value(radio_tag)
+        visibility = "private" if visibility_label == "Private" else "public"
 
     if dpg.does_item_exist(win_tag):
         dpg.delete_item(win_tag)
 
     rs = app.repos.get(repo_key)
     if not rs:
+        return
+    if use_gitlab:
+        dpg.set_value(rs.status_tag, f"Creating private GitLab project {url}...")
+        dpg.configure_item(rs.status_tag, color=COL_YELLOW)
+        executor.submit(bg_create_gitlab_remote, repo_key, url)
         return
     dpg.set_value(rs.status_tag, f"Creating {visibility} repo on {account}...")
     dpg.configure_item(rs.status_tag, color=COL_YELLOW)
@@ -4767,7 +4937,7 @@ def process_queue():
                 continue
             if ok:
                 rs.remote_url = detail
-                dpg.set_value(rs.status_tag, "GitHub repo created!")
+                dpg.set_value(rs.status_tag, "Remote repo created!")
                 dpg.configure_item(rs.status_tag, color=COL_GREEN)
                 # Rebuild to show GitHub button instead of Create Remote
                 executor.submit(bg_refresh_single_repo, repo_name)
@@ -4776,12 +4946,13 @@ def process_queue():
                 dpg.configure_item(rs.status_tag, color=COL_RED)
 
         elif kind == "gh_accounts_result":
-            _, repo_key, accounts, active_account, click_pos = msg
+            _, repo_key, accounts, active_account, click_pos, gl_cands = msg
             rs = app.repos.get(repo_key)
             if rs:
                 dpg.set_value(rs.status_tag, "")
                 _show_create_remote_popup(
-                    repo_key, accounts, active_account, click_pos)
+                    repo_key, accounts, active_account, click_pos,
+                    gitlab_candidates=gl_cands)
 
         elif kind == "preview_pull_error":
             _, repo_name, detail = msg

@@ -606,6 +606,108 @@ def get_remote_url(cwd):
     return url
 
 
+# One GitLab path segment (group, subgroup or project): letters, digits, `_`,
+# `-`, `.`; must not start with `-` or `.`. GitLab also reserves `.git` and
+# `.atom` suffixes on project paths.
+_GITLAB_SEGMENT_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]*$")
+
+
+def parse_gitlab_remote(url):
+    """Split a non-GitHub remote URL into GitLab push-to-create parts.
+
+    Returns ``{"prefix", "namespace", "project"}`` or ``None``. ``prefix`` is
+    everything before the namespace, with any embedded credentials removed, so
+    ``prefix + namespace + "/" + project + ".git"`` rebuilds a clean URL in the
+    SAME scheme as the source remote (HTTPS stays HTTPS, SSH stays SSH):
+
+      https://[tok@]host[:port]/ns/proj.git -> "https://host[:port]/"
+      git@host:ns/proj.git                  -> "git@host:"
+      ssh://git@host[:port]/ns/proj.git     -> "ssh://git@host[:port]/"
+
+    ``namespace`` keeps nested groups (``grp/sub/team``). github.com, local
+    paths, file:// URLs and projects with no namespace return ``None``.
+    """
+    if not url:
+        return None
+    url = url.strip().rstrip("/")
+    m = re.match(r"^(https?)://(?:[^@/]*@)?([^/]+)/(.+)$", url)
+    if m:
+        scheme, host, path = m.groups()
+        prefix = f"{scheme}://{host}/"
+    else:
+        m = re.match(r"^ssh://([^@/]+@)?([^/]+)/(.+)$", url)
+        if m:
+            user, host, path = m.groups()
+            prefix = f"ssh://{user or ''}{host}/"
+        else:
+            # scp-like: [user@]host:path -- but not a Windows drive (C:/...).
+            m = re.match(r"^([^@/:]+@)?([^/:]{2,}):(?!//)(.+)$", url)
+            if not m:
+                return None
+            user, host, path = m.groups()
+            prefix = f"{user or ''}{host}:"
+    hostname = host.split("@")[-1].split(":")[0].lower()
+    if hostname in ("github.com", "www.github.com"):
+        return None
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = [p for p in path.split("/") if p]
+    if len(parts) < 2:
+        return None
+    return {"prefix": prefix, "namespace": "/".join(parts[:-1]),
+            "project": parts[-1]}
+
+
+def gitlab_remote_candidates(urls):
+    """Rank the GitLab hosts and namespaces seen across *urls*.
+
+    Returns ``[{"prefix": str, "namespaces": [str, ...]}, ...]`` -- hosts by
+    how many remotes use them, and each host's namespaces likewise (ties keep
+    first-seen order). Used to prefill the Create-Remote popup.
+    """
+    hosts = {}  # prefix -> {namespace: count}; dicts keep first-seen order
+    for url in urls:
+        parsed = parse_gitlab_remote(url)
+        if not parsed:
+            continue
+        ns_counts = hosts.setdefault(parsed["prefix"], {})
+        ns_counts[parsed["namespace"]] = ns_counts.get(parsed["namespace"], 0) + 1
+    ranked = sorted(hosts.items(), key=lambda kv: -sum(kv[1].values()))
+    return [{"prefix": prefix,
+             "namespaces": [ns for ns, _ in sorted(ns_counts.items(),
+                                                   key=lambda kv: -kv[1])]}
+            for prefix, ns_counts in ranked]
+
+
+def build_gitlab_remote_url(prefix, namespace, project):
+    """Join popup fields into a push URL (``prefix`` from parse_gitlab_remote)."""
+    return f"{prefix.strip()}{namespace.strip().strip('/')}/{project.strip()}.git"
+
+
+def validate_gitlab_target(prefix, namespace, project):
+    """Return a user-facing error for the popup fields, or '' if they're usable."""
+    if not prefix.strip():
+        return "Host is required."
+    ns = namespace.strip().strip("/")
+    if not ns:
+        return "Namespace is required."
+    if not all(_GITLAB_SEGMENT_RE.match(seg) for seg in ns.split("/")):
+        return f"Invalid namespace '{ns}'."
+    name = project.strip()
+    if not name:
+        return "Project name is required."
+    if (not _GITLAB_SEGMENT_RE.match(name)
+            or name.endswith((".git", ".atom"))):
+        return (f"Invalid project name '{name}' (letters, digits, . _ - only; "
+                "no leading - or trailing .git).")
+    return ""
+
+
+def suggest_gitlab_project_name(folder_name):
+    """Folder name made GitLab-safe: invalid runs become '-', edges trimmed."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", folder_name).strip("-.")
+
+
 def get_head_sha(cwd):
     """Return the full SHA of HEAD, or empty string."""
     rc, stdout, _ = run_git(["rev-parse", "HEAD"], cwd=cwd)
