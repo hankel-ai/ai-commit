@@ -1830,12 +1830,8 @@ def default_config():
 # Repo list type-ahead
 # ---------------------------------------------------------------------------
 
-# How long a type-ahead buffer survives without a new keystroke, in seconds.
-TYPEAHEAD_TIMEOUT = 1.5
-
-
 def normalize_typeahead(text):
-    """Fold a repo name (or typed prefix) into its match form.
+    """Fold a repo name (or typed filter text) into its match form.
 
     Case-insensitive, and ``_`` folds to ``-`` so "ai_commit" and "ai-commit"
     are the same string to type: the keyboard reports the same physical key for
@@ -1844,34 +1840,15 @@ def normalize_typeahead(text):
     return (text or "").lower().replace("_", "-")
 
 
-def find_typeahead_match(entries, prefix):
-    """Return the first entry in *entries* matching the typed *prefix*.
+def filter_typeahead(entries, text):
+    """Return the keys of *entries* whose name contains the typed *text*.
 
-    *entries* is a list of ``(key, name)`` pairs **in display order** -- the
-    order the rows appear on screen, so the match is the first one the user
-    would scroll past. Returns the matching ``(key, name)`` pair, or
-    ``(None, "")`` when nothing matches.
-
-    Match order:
-      1. name starts with the prefix
-      2. the part after the last ``/`` starts with the prefix (display names of
-         duplicate repos are prefixed with their parent folder, e.g.
-         "ClaudeCode/hermes")
-      3. the prefix appears anywhere in the name
+    *entries* is a list of ``(key, name)`` pairs; the result keeps their order.
+    Matching is a plain substring test on the normalized display name (so a
+    duplicate shown as "ClaudeCode/hermes" also matches "claude"). Empty *text*
+    matches every entry -- no filter.
 
     Pure/testable -- see tests/test_typeahead.py.
     """
-    want = normalize_typeahead(prefix)
-    if not want:
-        return None, ""
-    normalized = [(key, name, normalize_typeahead(name)) for key, name in entries]
-    for key, name, norm in normalized:
-        if norm.startswith(want):
-            return key, name
-    for key, name, norm in normalized:
-        if norm.rsplit("/", 1)[-1].startswith(want):
-            return key, name
-    for key, name, norm in normalized:
-        if want in norm:
-            return key, name
-    return None, ""
+    want = normalize_typeahead(text)
+    return [key for key, name in entries if want in normalize_typeahead(name)]

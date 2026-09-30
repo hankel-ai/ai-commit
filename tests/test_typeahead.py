@@ -1,11 +1,10 @@
-"""Tests for the repo-list type-ahead matcher: ai_commit_core.find_typeahead_match
-and ai_commit_core.normalize_typeahead.
+"""Tests for the repo-list type-to-filter: ai_commit_core.filter_typeahead and
+ai_commit_core.normalize_typeahead.
 
-find_typeahead_match takes the rows in display order and the characters typed so
-far, and returns the first row the user meant. Matching is case-insensitive, '_'
-folds to '-' (the keyboard reports the same key for both), and the search falls
-back from a whole-name prefix, to a prefix after the parent-folder prefix used
-for duplicate display names, to a substring anywhere in the name.
+filter_typeahead takes the rows in display order and the text typed so far, and
+returns the keys of every row whose name contains that text, in the same order.
+Matching is case-insensitive and '_' folds to '-' (the keyboard reports the same
+key for both). Empty text keeps every row.
 
 Run: python tests/test_typeahead.py
 """
@@ -37,70 +36,56 @@ def check(name, cond):
         _failures.append(name)
 
 
-def match(prefix, rows=ROWS):
-    return core.find_typeahead_match(rows, prefix)
+def filt(text, rows=ROWS):
+    return core.filter_typeahead(rows, text)
 
 
-def test_empty_prefix_matches_nothing():
-    check("empty_none", match("") == (None, ""))
-    check("none_none", match(None) == (None, ""))
+def test_empty_text_keeps_everything():
+    all_keys = [k for k, _ in ROWS]
+    check("empty_all", filt("") == all_keys)
+    check("none_all", filt(None) == all_keys)
 
 
-def test_single_char_hits_first_in_display_order():
-    check("single_char", match("a")[0] == "h1")
-    check("single_char_m", match("m")[0] == "h5")
+def test_contains_not_prefix():
+    # "comm" is mid-word in ai-commit; "stack" is the tail of media-stack.
+    check("mid_word", filt("comm") == ["h1"])
+    check("suffix", filt("stack") == ["h5"])
+    check("single_char_anywhere", filt("v") == ["h6"])
+
+
+def test_every_match_kept_in_display_order():
+    check("ai_prefix_all", filt("ai") == ["h1", "h2", "h3"])
+    check("media_both", filt("media") == ["h5", "h6"])
+    check("e_many", filt("e") == ["h2", "h4", "h5", "h6"])
 
 
 def test_more_chars_narrow():
-    check("ai_n", match("ai-n")[0] == "h2")
-    check("media_v", match("media-v")[0] == "h6")
+    check("ai_n", filt("ai-n") == ["h2"])
+    check("media_v", filt("media-v") == ["h6"])
 
 
 def test_case_insensitive():
-    check("upper_prefix", match("MEDIA")[0] == "h5")
-    check("mixed_case_row", match("media-va")[0] == "h6")
+    check("upper_text", filt("MEDIA") == ["h5", "h6"])
+    check("mixed_case_row", filt("vault") == ["h6"])
 
 
 def test_underscore_folds_to_dash():
-    check("dash_finds_underscore", match("ai-t")[0] == "h3")
-    check("underscore_finds_dash", match("ai_c")[0] == "h1")
+    check("dash_finds_underscore", filt("ai-t") == ["h3"])
+    check("underscore_finds_dash", filt("ai_c") == ["h1"])
 
 
-def test_parent_prefixed_name_matches_on_repo_name():
-    check("after_slash", match("her")[0] == "h4")
-    check("full_prefix_still_works", match("claudecode/h")[0] == "h4")
+def test_parent_prefix_is_searchable():
+    check("repo_part", filt("herm") == ["h4"])
+    check("parent_part", filt("claude") == ["h4"])
+    check("across_slash", filt("code/h") == ["h4"])
 
 
-def test_substring_fallback():
-    check("substring", match("stack")[0] == "h5")
-    check("substring_mid_word", match("comm")[0] == "h1")
-
-
-def test_prefix_beats_substring():
-    rows = [("a", "stack-viewer"), ("b", "media-stack")]
-    # "stack" is a substring of both but a prefix of only the first.
-    check("prefix_wins", core.find_typeahead_match(rows, "stack")[0] == "a")
-    rows_reversed = [("b", "media-stack"), ("a", "stack-viewer")]
-    check("prefix_wins_regardless_of_order",
-          core.find_typeahead_match(rows_reversed, "stack")[0] == "a")
-
-
-def test_name_prefix_beats_after_slash_prefix():
-    rows = [("a", "ClaudeCode/hermes"), ("b", "hermes-lcm")]
-    check("whole_name_prefix_first",
-          core.find_typeahead_match(rows, "her")[0] == "b")
-
-
-def test_no_match_returns_none():
-    check("no_match", match("zzz") == (None, ""))
-
-
-def test_returns_name_alongside_key():
-    check("returns_name", match("ai-n")[1] == "ai-news")
+def test_no_match_is_empty():
+    check("no_match", filt("zzz") == [])
 
 
 def test_empty_row_list():
-    check("empty_rows", core.find_typeahead_match([], "a") == (None, ""))
+    check("empty_rows", core.filter_typeahead([], "a") == [])
 
 
 def test_normalize():
@@ -110,17 +95,14 @@ def test_normalize():
 
 
 def main():
-    test_empty_prefix_matches_nothing()
-    test_single_char_hits_first_in_display_order()
+    test_empty_text_keeps_everything()
+    test_contains_not_prefix()
+    test_every_match_kept_in_display_order()
     test_more_chars_narrow()
     test_case_insensitive()
     test_underscore_folds_to_dash()
-    test_parent_prefixed_name_matches_on_repo_name()
-    test_substring_fallback()
-    test_prefix_beats_substring()
-    test_name_prefix_beats_after_slash_prefix()
-    test_no_match_returns_none()
-    test_returns_name_alongside_key()
+    test_parent_prefix_is_searchable()
+    test_no_match_is_empty()
     test_empty_row_list()
     test_normalize()
     if _failures:

@@ -122,8 +122,7 @@ from ai_commit_core import (
     is_git_repo,
     verify_repo_usable,
     run_git,
-    TYPEAHEAD_TIMEOUT,
-    find_typeahead_match,
+    filter_typeahead,
     normalize_typeahead,
 )
 
@@ -379,8 +378,7 @@ class AppState:
     show_pull_prompt_on_next_poll: bool = False  # transient: "Pull" button clicked, refresh pending, show prompt on poll_result
     git_proxy_enabled: bool = False  # serve the watched repos read-only over LAN HTTP
     git_proxy_port: int = git_proxy.DEFAULT_PORT
-    typeahead_buf: str = ""  # transient: characters typed to jump to a repo in the list
-    typeahead_ts: float = 0.0  # epoch of the last type-ahead keystroke (buffer expiry)
+    typeahead_buf: str = ""  # transient: typed text filtering the repo list (contains match)
     typeahead_miss: bool = False  # the current buffer matched nothing (shown in the toolbar)
 
 
@@ -4210,13 +4208,12 @@ def _non_git_for_rebuild():
 
 
 # ---------------------------------------------------------------------------
-# Repo list type-ahead ("type the first few letters to jump to a repo")
+# Repo list type-to-filter ("type part of a name to show only matching repos")
 # ---------------------------------------------------------------------------
-# The list is a single scrolling child window whose rows are collapsing headers
-# of *varying* height -- an expanded repo is many rows tall. So the jump can
-# never be computed from a row index; it is computed from the header's real
-# on-screen y position for the current frame, which stays correct no matter
-# which repos are expanded.
+# Rows that don't contain the typed text are hidden with show=False, not
+# deleted, so clearing the filter is instant and needs no rebuild. The filter
+# persists until Esc (or Backspace to empty); rebuild_repos_ui re-applies it to
+# the rows each poll re-creates.
 
 _typeahead_keymap_cache = None
 
@@ -4295,17 +4292,19 @@ def _typeahead_blocked():
 
 
 def _typeahead_entries():
-    """The repo/folder rows currently in the list, in on-screen order.
+    """``(children, entries)`` for the repo list.
 
-    Read from repos_container's children rather than from app.repos so the order
-    matches what is rendered and rows hidden by the "Recent" filter are skipped.
+    *children* is every item in repos_container (rows plus transient "..."
+    placeholders); *entries* is the ``(header_tag, name)`` pairs for the repo and
+    folder rows among them. Read from repos_container rather than app.repos so
+    rows hidden by the "Recent" filter (never built) are skipped.
     """
     if not dpg.does_item_exist("repos_container"):
-        return []
+        return [], []
     try:
         children = dpg.get_item_children("repos_container", 1) or []
     except Exception:
-        return []
+        return [], []
     by_tag = {}
     for rs in app.repos.values():
         if rs.header_tag:
@@ -4318,66 +4317,7 @@ def _typeahead_entries():
         name = by_tag.get(child)
         if name:
             entries.append((child, name))
-    return entries
-
-
-def _row_y(item):
-    """Screen y of a list row, or None when dearpygui has no rect for it."""
-    try:
-        rect = dpg.get_item_rect_min(item)
-    except Exception:
-        return None
-    if not rect:
-        return None
-    return float(rect[1])
-
-
-def _scroll_header_into_view(header_tag, entries):
-    """Scroll repos_container so *header_tag* sits at the top of the view.
-
-    The offset is derived from the **first row's** screen y, not the container's.
-    Both rows are laid out in the same frame and shifted by the same scroll, so
-    ``y(header) - y(first_row)`` is exactly the difference in *content* offset,
-    and the first row sits at content offset ~0 -- which makes that difference
-    the scroll value that puts the header at the top. No dependence on the child
-    window's own rect (dearpygui does not reliably expose one) and none on the
-    current scroll position.
-    """
-    if not dpg.does_item_exist("repos_container") or not entries:
-        return
-    header_y = _row_y(header_tag)
-    first_y = _row_y(entries[0][0])
-    try:
-        maximum = float(dpg.get_y_scroll_max("repos_container"))
-        current = float(dpg.get_y_scroll("repos_container"))
-    except Exception:
-        maximum, current = 0.0, 0.0
-    if header_y is None or first_y is None:
-        if _debug_mode:
-            print(f"[typeahead] no rect header_y={header_y} first_y={first_y}",
-                  flush=True)
-        return
-    target = max(0.0, min(header_y - first_y, maximum))
-    if _debug_mode:
-        print(f"[typeahead] header_y={header_y} first_y={first_y} "
-              f"cur={current} max={maximum} target={target}", flush=True)
-    if header_tag != entries[0][0] and header_y == first_y:
-        # Every row reports the same y -- this dearpygui build does not track a
-        # rect for collapsing headers, so there is nothing to compute from.
-        # Fall back to focusing the row: ImGui scrolls a focused item into view.
-        if _debug_mode:
-            print("[typeahead] rects flat, falling back to focus_item", flush=True)
-        try:
-            dpg.focus_item(header_tag)
-        except Exception:
-            pass
-        return
-    try:
-        dpg.set_y_scroll("repos_container", target,
-                         when=dpg.mvSetScrollFlags_Both)
-    except Exception:
-        # Older dearpygui builds without the `when` flag.
-        dpg.set_y_scroll("repos_container", target)
+    return children, entries
 
 
 def _typeahead_render():
@@ -4393,31 +4333,40 @@ def _typeahead_render():
                        color=COL_RED if app.typeahead_miss else COL_YELLOW)
 
 
-def _typeahead_reset():
-    app.typeahead_buf = ""
-    app.typeahead_miss = False
-    _typeahead_render()
+def _typeahead_apply(scroll_top=True):
+    """Show only the rows whose name contains the buffer; hide the rest.
 
-
-def _typeahead_apply():
-    """Jump to the first row matching the buffer; mark a miss when there is none."""
-    entries = _typeahead_entries()
-    header_tag, name = find_typeahead_match(entries, app.typeahead_buf)
-    app.typeahead_miss = header_tag is None
+    An empty buffer shows everything. Placeholders ("repo  ...") are hidden
+    while a filter is active -- they are not rows the user asked for.
+    """
+    children, entries = _typeahead_entries()
+    visible = set(filter_typeahead(entries, app.typeahead_buf))
+    filtering = bool(app.typeahead_buf)
+    for child in children:
+        show = not filtering or child in visible
+        try:
+            dpg.configure_item(child, show=show)
+        except Exception:
+            pass
+    app.typeahead_miss = filtering and not visible
     if _debug_mode:
         print(f"[typeahead] buf={app.typeahead_buf!r} rows={len(entries)} "
-              f"match={name!r} tag={header_tag}", flush=True)
-    if header_tag is not None:
-        _scroll_header_into_view(header_tag, entries)
+              f"visible={len(visible)}", flush=True)
+    if scroll_top and dpg.does_item_exist("repos_container"):
+        # The list just shrank or grew; start from the top so matches aren't
+        # left scrolled out of view.
+        try:
+            dpg.set_y_scroll("repos_container", 0.0)
+        except Exception:
+            pass
     _typeahead_render()
 
 
 def cb_typeahead_key(sender, app_data, user_data):
-    """Global key handler driving the repo list type-ahead.
+    """Global key handler driving the repo list type-to-filter.
 
-    Letters/digits/'-' extend the buffer, Backspace trims it, Escape clears it.
-    An idle gap longer than TYPEAHEAD_TIMEOUT also clears it (see the render
-    loop), so a later burst starts a fresh search instead of appending.
+    Letters/digits/'-'/'.' extend the buffer, Backspace trims it, Escape clears
+    it. The filter stays until cleared -- there is no idle timeout.
     """
     if _typeahead_blocked():
         return
@@ -4425,27 +4374,20 @@ def cb_typeahead_key(sender, app_data, user_data):
     escape = getattr(dpg, "mvKey_Escape", None)
     back = getattr(dpg, "mvKey_Back", None)
     if escape is not None and key == escape:
-        _typeahead_reset()
+        if app.typeahead_buf:
+            app.typeahead_buf = ""
+            _typeahead_apply()
         return
-    now = time.time()
     if back is not None and key == back:
         if not app.typeahead_buf:
             return
         app.typeahead_buf = app.typeahead_buf[:-1]
-        app.typeahead_ts = now
-        if not app.typeahead_buf:
-            _typeahead_reset()
-        else:
-            _typeahead_apply()
+        _typeahead_apply()
         return
     ch = _typeahead_keymap().get(key)
     if ch is None:
         return
-    if app.typeahead_buf and now - app.typeahead_ts > TYPEAHEAD_TIMEOUT:
-        app.typeahead_buf = ""
-        app.typeahead_miss = False
     app.typeahead_buf += ch
-    app.typeahead_ts = now
     _typeahead_apply()
 
 
@@ -4631,6 +4573,11 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
 
     app.repos = new_repos
     app.non_git_folders = new_non_git
+
+    # Re-apply an active type-to-filter to the freshly built rows. No scroll
+    # reset: a background poll must not yank the view.
+    if app.typeahead_buf:
+        _typeahead_apply(scroll_top=False)
 
     # Auto-generate for repos with changes and no message
     for name, rs in app.repos.items():
@@ -5617,7 +5564,7 @@ def main():
             with dpg.tooltip(dpg.last_item()):
                 dpg.add_text("Show only recently modified")
             dpg.add_text("", tag="hidden_count_label", color=COL_DIM)
-            # Type-ahead buffer readout (see cb_typeahead_key)
+            # Type-to-filter buffer readout (see cb_typeahead_key)
             dpg.add_text("", tag="typeahead_label", color=COL_YELLOW)
             with dpg.tooltip(dpg.last_item()):
                 dpg.add_text("Type a repo name to jump to it "
@@ -5718,10 +5665,6 @@ def main():
             _hide_window()
 
         now = time.time()
-
-        # Expire a stale type-ahead buffer so the next burst starts fresh.
-        if app.typeahead_buf and now - app.typeahead_ts > TYPEAHEAD_TIMEOUT:
-            _typeahead_reset()
 
         has_force_active = any(v == "active" for v in app.repo_overrides.values())
         if (not app.paused or has_force_active) and now - app.last_poll >= app.poll_interval:
