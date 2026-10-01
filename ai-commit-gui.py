@@ -3513,7 +3513,7 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
             f"  ** Folder mismatch: folder is \"{rs.folder_name}\" but repo is \"{rs.name}\" **",
             color=COL_YELLOW, parent=rs.header_tag)
 
-    # Links row: Copy-Path, Open Folder, Terminal, GitHub, More
+    # Links row: Copy-Path, Open Folder, Terminal, Git-Remote, More
     with dpg.group(horizontal=True, parent=rs.header_tag):
         copy_btn = dpg.add_button(
             label="Copy-Path",
@@ -3534,7 +3534,7 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
             callback=cb_clean_preview, user_data=str(rs.path))
         dpg.bind_item_theme(clean_btn, link_btn_theme)
         if rs.remote_url:
-            btn = dpg.add_button(label="GitHub", callback=cb_open_repo_url, user_data=rs.remote_url)
+            btn = dpg.add_button(label="Git-Remote", callback=cb_open_repo_url, user_data=rs.remote_url)
             dpg.bind_item_theme(btn, link_btn_theme)
         else:
             btn = dpg.add_button(label="Create-Remote", callback=cb_create_remote, user_data=str(rs.path))

@@ -47,7 +47,8 @@ def check(name, cond):
 
 
 def _result(key, ts):
-    return {"path": Path(key), "entries": [], "remote_url": "", "branch": "main",
+    return {"path": Path(key), "entries": [],
+            "remote_url": "https://gitlab.example.com/team/ai-commit.git" if key == ACTIVE else "", "branch": "main",
             "last_commit_ts": ts, "last_commit_date": "", "ahead": 0, "behind": 0}
 
 
@@ -186,6 +187,9 @@ def test_copy_path_button():
         kind = "repo" if key == ACTIVE else "folder"
         check(f"link_order_{kind}",
               labels[:3] == ["Copy-Path", "Folder", "Terminal"])
+        if kind == "repo":
+            check("remote_link_named_git_remote",
+                  "Git-Remote" in labels and "GitHub" not in labels)
         btn = btns[labels.index("Copy-Path")]
         cfg = dpg.get_item_configuration(btn)
         check(f"copypath_wired_{kind}",
