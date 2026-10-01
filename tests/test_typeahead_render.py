@@ -56,6 +56,8 @@ def _setup():
         expand_on_next_build=set(), collapse_on_next_build=set(),
         repo_overrides={}, paused=False, expanded_changes=set(),
         typeahead_buf="", typeahead_miss=False,
+        recent_only=False, last_results={}, last_non_git={},
+        poll_pending=set(),
     )
     with dpg.window(tag="primary"):
         dpg.add_text("", tag="typeahead_label")

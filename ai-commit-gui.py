@@ -2820,6 +2820,12 @@ def _cb_confirm_secret_push(sender, app_data, user_data):
     executor.submit(bg_push_override, repo_name, branch)
 
 
+def cb_copy_path(sender, app_data, user_data):
+    """Put the repo/folder's full filesystem path on the clipboard."""
+    if user_data:
+        dpg.set_clipboard_text(str(user_data))
+
+
 def cb_open_terminal(sender, app_data, user_data):
     if not user_data:
         return
@@ -3507,8 +3513,14 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
             f"  ** Folder mismatch: folder is \"{rs.folder_name}\" but repo is \"{rs.name}\" **",
             color=COL_YELLOW, parent=rs.header_tag)
 
-    # Links row: Terminal, Open Folder, GitHub, More
+    # Links row: CopyPath, Terminal, Open Folder, GitHub, More
     with dpg.group(horizontal=True, parent=rs.header_tag):
+        copy_btn = dpg.add_button(
+            label="CopyPath",
+            callback=cb_copy_path, user_data=str(rs.path))
+        dpg.bind_item_theme(copy_btn, link_btn_theme)
+        with dpg.tooltip(copy_btn):
+            dpg.add_text(f"Copy {rs.path}")
         term_btn = dpg.add_button(
             label="Terminal",
             callback=cb_open_terminal, user_data=str(rs.path))
@@ -3648,6 +3660,12 @@ def build_non_git_section(ngf, parent, preserve_open=False, prior_open=None):
         default_open=default_open,
     )
     with dpg.group(horizontal=True, parent=ngf.header_tag):
+        copy_btn = dpg.add_button(
+            label="CopyPath",
+            callback=cb_copy_path, user_data=str(ngf.path))
+        dpg.bind_item_theme(copy_btn, link_btn_theme)
+        with dpg.tooltip(copy_btn):
+            dpg.add_text(f"Copy {ngf.path}")
         term_btn = dpg.add_button(
             label="Terminal",
             callback=cb_open_terminal, user_data=str(ngf.path))
@@ -4297,7 +4315,8 @@ def _typeahead_entries():
     *children* is every item in repos_container (rows plus transient "..."
     placeholders); *entries* is the ``(header_tag, name)`` pairs for the repo and
     folder rows among them. Read from repos_container rather than app.repos so
-    rows hidden by the "Recent" filter (never built) are skipped.
+    rows not built this render are skipped (the "Recent" filter is lifted while
+    the buffer is non-empty -- see _typeahead_set).
     """
     if not dpg.does_item_exist("repos_container"):
         return [], []
@@ -4362,6 +4381,28 @@ def _typeahead_apply(scroll_top=True):
     _typeahead_render()
 
 
+def _recency_filter_on():
+    """Whether "Recent only" hides idle rows right now. Typed text searches
+    every repo, so the recency filter steps aside while the buffer is set."""
+    return app.recent_only and not app.typeahead_buf
+
+
+def _typeahead_set(buf):
+    """Change the type-to-filter buffer and re-filter the list.
+
+    Rows hidden by "Recent only" are never built, so crossing between an empty
+    and a non-empty buffer re-renders from the last poll payload (no git work)
+    to build them in -- or drop them again once the search is cleared.
+    """
+    was_filtering = bool(app.typeahead_buf)
+    app.typeahead_buf = buf
+    if (app.recent_only and was_filtering != bool(buf)
+            and (app.last_results or app.last_non_git)):
+        rebuild_repos_ui(app.last_results, app.last_non_git,
+                         preserve_open=True, pending=app.poll_pending)
+    _typeahead_apply()
+
+
 def cb_typeahead_key(sender, app_data, user_data):
     """Global key handler driving the repo list type-to-filter.
 
@@ -4375,20 +4416,17 @@ def cb_typeahead_key(sender, app_data, user_data):
     back = getattr(dpg, "mvKey_Back", None)
     if escape is not None and key == escape:
         if app.typeahead_buf:
-            app.typeahead_buf = ""
-            _typeahead_apply()
+            _typeahead_set("")
         return
     if back is not None and key == back:
         if not app.typeahead_buf:
             return
-        app.typeahead_buf = app.typeahead_buf[:-1]
-        _typeahead_apply()
+        _typeahead_set(app.typeahead_buf[:-1])
         return
     ch = _typeahead_keymap().get(key)
     if ch is None:
         return
-    app.typeahead_buf += ch
-    _typeahead_apply()
+    _typeahead_set(app.typeahead_buf + ch)
 
 
 def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
@@ -4533,10 +4571,13 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
     # When "Recent only" is on, hide idle repos (clean, synced, last commit older
     # than recent_days) -- but always keep force-active repos and repos with a
     # sticky error visible. Hidden repos stay in app.repos (state/polling continue).
+    # A non-empty type-to-filter buffer lifts the recency filter so typing can
+    # find any repo (see _recency_filter_on).
+    recency_on = _recency_filter_on()
     now = time.time()
     hidden_count = 0
     for rs in sorted(new_repos.values(), key=lambda r: (0 if r.entries else 1, -r.last_commit_ts) if app.sort_by_date else r.name.lower()):
-        if app.recent_only:
+        if recency_on:
             repo_force_active = app.repo_overrides.get(str(rs.path), "") == "active"
             sticky_error = rs.gen_status == GenStatus.ERROR
             if (not repo_force_active and not sticky_error
@@ -4552,7 +4593,7 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
     # on). Hidden folders stay in app.non_git_folders so toggling re-shows them.
     if app.show_non_git_folders:
         for ngf in sorted(new_non_git.values(), key=lambda n: -n.mtime if app.sort_by_date else str(n.path).lower()):
-            if app.recent_only and not is_folder_recent(ngf.mtime, now,
+            if recency_on and not is_folder_recent(ngf.mtime, now,
                                                         app.recent_days):
                 hidden_count += 1
                 continue
@@ -4569,7 +4610,7 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
 
     if dpg.does_item_exist("hidden_count_label"):
         dpg.set_value("hidden_count_label",
-                      f"{hidden_count} hidden" if (app.recent_only and hidden_count) else "")
+                      f"{hidden_count} hidden" if (recency_on and hidden_count) else "")
 
     app.repos = new_repos
     app.non_git_folders = new_non_git
