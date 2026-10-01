@@ -3513,22 +3513,22 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
             f"  ** Folder mismatch: folder is \"{rs.folder_name}\" but repo is \"{rs.name}\" **",
             color=COL_YELLOW, parent=rs.header_tag)
 
-    # Links row: CopyPath, Terminal, Open Folder, GitHub, More
+    # Links row: Copy-Path, Open Folder, Terminal, GitHub, More
     with dpg.group(horizontal=True, parent=rs.header_tag):
         copy_btn = dpg.add_button(
-            label="CopyPath",
+            label="Copy-Path",
             callback=cb_copy_path, user_data=str(rs.path))
         dpg.bind_item_theme(copy_btn, link_btn_theme)
         with dpg.tooltip(copy_btn):
             dpg.add_text(f"Copy {rs.path}")
-        term_btn = dpg.add_button(
-            label="Terminal",
-            callback=cb_open_terminal, user_data=str(rs.path))
-        dpg.bind_item_theme(term_btn, link_btn_theme)
         folder_btn = dpg.add_button(
             label="Folder",
             callback=cb_open_folder, user_data=str(rs.path))
         dpg.bind_item_theme(folder_btn, link_btn_theme)
+        term_btn = dpg.add_button(
+            label="Terminal",
+            callback=cb_open_terminal, user_data=str(rs.path))
+        dpg.bind_item_theme(term_btn, link_btn_theme)
         clean_btn = dpg.add_button(
             label="Clean",
             callback=cb_clean_preview, user_data=str(rs.path))
@@ -3661,19 +3661,19 @@ def build_non_git_section(ngf, parent, preserve_open=False, prior_open=None):
     )
     with dpg.group(horizontal=True, parent=ngf.header_tag):
         copy_btn = dpg.add_button(
-            label="CopyPath",
+            label="Copy-Path",
             callback=cb_copy_path, user_data=str(ngf.path))
         dpg.bind_item_theme(copy_btn, link_btn_theme)
         with dpg.tooltip(copy_btn):
             dpg.add_text(f"Copy {ngf.path}")
-        term_btn = dpg.add_button(
-            label="Terminal",
-            callback=cb_open_terminal, user_data=str(ngf.path))
-        dpg.bind_item_theme(term_btn, link_btn_theme)
         folder_btn = dpg.add_button(
             label="Folder",
             callback=cb_open_folder, user_data=str(ngf.path))
         dpg.bind_item_theme(folder_btn, link_btn_theme)
+        term_btn = dpg.add_button(
+            label="Terminal",
+            callback=cb_open_terminal, user_data=str(ngf.path))
+        dpg.bind_item_theme(term_btn, link_btn_theme)
         init_btn = dpg.add_button(
             label="Init",
             callback=cb_git_init, user_data=str(ngf.path))

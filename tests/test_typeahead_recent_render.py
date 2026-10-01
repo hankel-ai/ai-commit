@@ -8,7 +8,7 @@ typed text narrows them. Clearing the buffer drops the idle rows again.
 Drives the real rebuild_repos_ui and the real key handler inside a Dear PyGui
 context (no viewport), then reads which rows exist and which are shown.
 
-Also covers the CopyPath link button (before Terminal) on repo and non-git rows.
+Also covers the Copy-Path link button (row order Copy-Path, Folder, Terminal) on repo and non-git rows.
 
 Run: python tests/test_typeahead_recent_render.py
 """
@@ -184,10 +184,9 @@ def test_copy_path_button():
         btns = _buttons(header)
         labels = [dpg.get_item_label(b) for b in btns]
         kind = "repo" if key == ACTIVE else "folder"
-        check(f"copypath_before_terminal_{kind}",
-              "CopyPath" in labels and "Terminal" in labels
-              and labels.index("CopyPath") + 1 == labels.index("Terminal"))
-        btn = btns[labels.index("CopyPath")]
+        check(f"link_order_{kind}",
+              labels[:3] == ["Copy-Path", "Folder", "Terminal"])
+        btn = btns[labels.index("Copy-Path")]
         cfg = dpg.get_item_configuration(btn)
         check(f"copypath_wired_{kind}",
               cfg["callback"] is m.cb_copy_path and cfg["user_data"] == key)
