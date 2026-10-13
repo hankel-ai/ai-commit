@@ -826,17 +826,21 @@ def get_last_commit(cwd):
     return msg_out.strip(), short_date, commit_ts
 
 
-def is_repo_active(commit_ts, dirty, ahead, behind, now, recent_days):
+def is_repo_active(commit_ts, dirty, ahead, behind, now, recent_days,
+                   unpublished=False):
     """Whether a repo counts as *active* (shown in the list + polled every cycle).
 
     Active when the working tree is dirty, there are unpushed/unpulled commits
-    (ahead/behind), or the last commit is within *recent_days*. Otherwise the repo
-    is idle: hidden by the recency filter and polled on the slow idle cadence.
+    (ahead/behind), the current branch is not on the remote yet (*unpublished*,
+    see ``should_offer_publish`` -- a fresh branch off an old commit would
+    otherwise hide along with its Publish button), or the last commit is within
+    *recent_days*. Otherwise the repo is idle: hidden by the recency filter and
+    polled on the slow idle cadence.
 
     Pure/testable tier decision -- see docs/polling-performance.md and
     tests/test_recency.py.
     """
-    if dirty or ahead or behind:
+    if dirty or ahead or behind or unpublished:
         return True
     if commit_ts and (now - commit_ts) <= recent_days * 86400:
         return True
@@ -1750,6 +1754,18 @@ def should_offer_push(ahead, behind, remote_url):
     non-fast-forward, and that banner offers Preview Pull instead.
     """
     return bool(remote_url) and int(ahead) > 0 and int(behind) == 0
+
+
+def should_offer_publish(branch_status, remote_url):
+    """True if the UI should offer to put the current branch on the remote.
+
+    *branch_status* is ``parse_branch_header``'s classification. ``"local
+    only"`` (no upstream) is the fresh-branch case: Commit & Push only renders
+    for a dirty tree, so a new branch with no changes had no way to be pushed.
+    ``"stale"`` (upstream deleted on the remote) is a different situation and
+    is not offered. Detached HEAD and unborn branches classify as ``""``.
+    """
+    return bool(remote_url) and branch_status == "local only"
 
 
 def do_commit_and_push(cwd, message):

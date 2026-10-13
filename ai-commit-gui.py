@@ -96,6 +96,7 @@ from ai_commit_core import (
     parse_upstream_mismatch,
     remote_reject_reason,
     should_offer_push,
+    should_offer_publish,
     SECRET_PUSH_SKIP_OPTION,
     generate_message,
     get_active_github_account,
@@ -1113,7 +1114,10 @@ def bg_poll_repos(force=False):
                     and not is_repo_active(existing.last_commit_ts,
                                            bool(existing.entries),
                                            existing.ahead, existing.behind,
-                                           now, app.recent_days)
+                                           now, app.recent_days,
+                                           unpublished=should_offer_publish(
+                                               existing.branch_status,
+                                               existing.remote_url))
                     and now - app.idle_last_poll.get(repo_key, 0) < app.idle_poll_interval):
                 results[repo_key] = _cached_repo_result(rp, existing)
                 continue
@@ -2951,6 +2955,18 @@ def cb_push_now(sender, app_data, user_data):
     executor.submit(bg_push_only, repo_key)
 
 
+def cb_publish_branch(sender, app_data, user_data):
+    """Publish button on the local-only banner -- push --set-upstream."""
+    repo_key = user_data
+    rs = app.repos.get(repo_key)
+    if not rs or not rs.branch:
+        return
+    if rs.status_tag and dpg.does_item_exist(rs.status_tag):
+        dpg.set_value(rs.status_tag, f"Pushing to origin/{rs.branch}...")
+        dpg.configure_item(rs.status_tag, color=COL_YELLOW)
+    executor.submit(bg_push_set_upstream, repo_key, rs.branch)
+
+
 def cb_view_commit_diff(sender, app_data, user_data):
     """View Diff on an incoming commit row in the Preview Pull window."""
     repo_path, sha, subject = user_data
@@ -3506,6 +3522,19 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
                 dpg.bind_item_theme(push_btn, green_btn_theme)
         else:
             dpg.add_text(f"  !! {sync_text} - PUSH REQUIRED !!", color=COL_RED, parent=rs.header_tag)
+
+    # Local-only branch: rendered above the `if rs.entries:` split so a fresh
+    # branch with no changes yet can still be pushed (Commit & Push needs a
+    # dirty tree).
+    if should_offer_publish(rs.branch_status, rs.remote_url):
+        with dpg.group(horizontal=True, parent=rs.header_tag):
+            dpg.add_text(f"  Branch '{rs.branch}' is not on the remote",
+                         color=COL_YELLOW)
+            publish_btn = dpg.add_button(label="Publish", callback=cb_publish_branch,
+                                         user_data=str(rs.path))
+            dpg.bind_item_theme(publish_btn, green_btn_theme)
+            with dpg.tooltip(publish_btn):
+                dpg.add_text(f"git push --set-upstream origin {rs.branch}")
 
     # Folder name mismatch warning
     if rs.folder_name != rs.name:
@@ -4616,7 +4645,9 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
             sticky_error = rs.gen_status == GenStatus.ERROR
             if (not repo_force_active and not sticky_error
                     and not is_repo_active(rs.last_commit_ts, bool(rs.entries),
-                                           rs.ahead, rs.behind, now, app.recent_days)):
+                                           rs.ahead, rs.behind, now, app.recent_days,
+                                           unpublished=should_offer_publish(
+                                               rs.branch_status, rs.remote_url))):
                 hidden_count += 1
                 continue
         build_repo_section(rs, "repos_container", label_width=label_width,
