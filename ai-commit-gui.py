@@ -4274,13 +4274,52 @@ def _item_in_primary(item):
     return False
 
 
+def _is_input_item(item):
+    try:
+        return "Input" in dpg.get_item_info(item).get("type", "")
+    except Exception:
+        return False
+
+
+def _focused_input_within(item, limit=2000):
+    """Whether *item* is, or contains, a text/number field that has focus.
+
+    dpg.get_focused_item() does not always name the field itself: a group
+    updates its item state after EndGroup, and ImGui reports a group as focused
+    when it contains the focused item, so the OUTERMOST group around a field
+    (e.g. the MORE panel's "New branch" row) overwrites it. Walk down from the
+    reported item to find the field.
+    """
+    stack = [item]
+    seen = 0
+    while stack and seen < limit:
+        cur = stack.pop()
+        seen += 1
+        if not cur or not dpg.does_item_exist(cur):
+            continue
+        if _is_input_item(cur):
+            if cur == item:
+                return True
+            try:
+                if dpg.is_item_focused(cur) or dpg.is_item_active(cur):
+                    return True
+            except Exception:
+                pass
+            continue
+        try:
+            stack.extend(dpg.get_item_children(cur, 1) or [])
+        except Exception:
+            pass
+    return False
+
+
 def _typeahead_blocked():
     """Whether keystrokes belong to something other than the repo list.
 
     Blocked while a text/number field has focus (commit message boxes, the model
-    input, settings) and while a dialog window owns the keyboard. Deliberately
-    permissive: if dearpygui cannot answer, type-ahead stays enabled rather than
-    silently dying.
+    input, the MORE panel's New branch field, settings) and while a dialog
+    window owns the keyboard. Deliberately permissive: if dearpygui cannot
+    answer, type-ahead stays enabled rather than silently dying.
     """
     for mod in ("mvKey_LControl", "mvKey_RControl", "mvKey_LAlt", "mvKey_RAlt"):
         code = getattr(dpg, mod, None)
@@ -4293,13 +4332,8 @@ def _typeahead_blocked():
         focused = dpg.get_focused_item()
     except Exception:
         focused = 0
-    if focused and dpg.does_item_exist(focused):
-        try:
-            itype = dpg.get_item_info(focused).get("type", "")
-        except Exception:
-            itype = ""
-        if "Input" in itype:
-            return True
+    if focused and dpg.does_item_exist(focused) and _focused_input_within(focused):
+        return True
     try:
         active_window = dpg.get_active_window()
     except Exception:
