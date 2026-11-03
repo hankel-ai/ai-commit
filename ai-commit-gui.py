@@ -84,6 +84,7 @@ from tray_animation import (
 from ai_commit_core import (
     STATUS_LABELS,
     KiroCliError,
+    resolve_kiro_cli,
     OllamaError,
     compute_header_open,
     default_config,
@@ -360,6 +361,7 @@ class AppState:
     model: str = "qwen3-coder:480b-cloud"
     provider: str = "ollama"
     ollama_url: str = "http://localhost:11434"
+    kiro_cli_path: str = ""  # blank = find kiro-cli automatically
     last_poll: float = 0.0
     paused: bool = False
     actions_popup_enabled: bool = True
@@ -473,6 +475,7 @@ def _save_settings():
             "model": app.model,
             "provider": app.provider,
             "ollama_url": app.ollama_url,
+            "kiro_cli_path": app.kiro_cli_path,
             "watched_folders": [str(f) for f in app.watched_folders],
             "actions_popup_enabled": app.actions_popup_enabled,
             "chime_on_completion": app.chime_on_completion,
@@ -1205,7 +1208,8 @@ def bg_generate_message(repo_name):
             detail = describe_empty_diff(rs.path) or "No diff content available."
             ui_queue.put(("gen_result", repo_name, "", detail))
             return
-        config = {"provider": app.provider, "model": app.model, "url": app.ollama_url}
+        config = {"provider": app.provider, "model": app.model, "url": app.ollama_url,
+                  "kiro_cli": app.kiro_cli_path}
         activity_log.log_event(
             f"Generate commit message ({app.provider}/{app.model})",
             repo=repo_name, category=activity_log.CAT_AI,
@@ -2110,6 +2114,14 @@ def cb_open_settings(sender, app_data):
                                default_value=app.ollama_url, width=-1,
                                callback=cb_ollama_url_changed, on_enter=True,
                                hint="http://localhost:11434")
+        with dpg.group(horizontal=True):
+            dpg.add_text("Kiro CLI:", color=COL_DIM)
+            dpg.add_input_text(tag="settings_kiro_cli",
+                               default_value=app.kiro_cli_path, width=-1,
+                               callback=cb_kiro_cli_changed,
+                               hint="Blank = find automatically")
+        dpg.add_text("", tag="settings_kiro_status", color=COL_DIM, wrap=310)
+        _update_kiro_cli_status()  # fills in the status line just created
         dpg.add_spacer(height=6)
         dpg.add_text("Git Proxy (LAN)", color=COL_ACCENT)
         dpg.add_checkbox(label="Serve watched repos over LAN (read-only)",
@@ -3276,6 +3288,22 @@ def cb_ollama_url_changed(sender, app_data):
     if val:
         app.ollama_url = val
         _save_settings()
+
+
+def _update_kiro_cli_status():
+    """Show which kiro-cli Generate will run, or why it can't find one."""
+    try:
+        text, color = f"Using: {resolve_kiro_cli(app.kiro_cli_path)}", COL_DIM
+    except KiroCliError as exc:
+        text, color = str(exc).splitlines()[0], COL_RED
+    dpg.set_value("settings_kiro_status", text)
+    dpg.configure_item("settings_kiro_status", color=color)
+
+
+def cb_kiro_cli_changed(sender, app_data):
+    app.kiro_cli_path = dpg.get_value(sender).strip().strip('"').strip()
+    _update_kiro_cli_status()
+    _save_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -5561,6 +5589,7 @@ def main():
             app.provider = saved["provider"]
         if "ollama_url" in saved:
             app.ollama_url = saved["ollama_url"]
+        app.kiro_cli_path = saved.get("kiro_cli_path", "")
         app.actions_popup_enabled = saved.get("actions_popup_enabled", True)
         app.chime_on_completion = saved.get("chime_on_completion", False)
         app.show_non_git_folders = saved.get("show_non_git_folders", True)

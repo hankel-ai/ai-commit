@@ -13,8 +13,9 @@ AI-powered git commit message generator with GUI and CLI interfaces.
 ## AI Providers
 
 - **Ollama** (default) — HTTP API to local/remote Ollama instance (`/api/chat`)
-- **Kiro** — Native Windows `kiro-cli.exe` (**not** WSL). `resolve_kiro_cli()` looks at
-  `AI_COMMIT_KIRO_CLI` (full path override) → `PATH` → known install locations
+- **Kiro** — Native Windows `kiro-cli.exe` (**not** WSL). `resolve_kiro_cli(configured)` looks at
+  the **Settings → Provider → Kiro CLI** path (`kiro_cli_path` in the settings JSON; `%VAR%` allowed, a missing
+  path raises rather than falling through; the CLI has no such setting) → `AI_COMMIT_KIRO_CLI` (full path override) → `PATH` → known install locations
   (`%LOCALAPPDATA%\Programs\kiro-cli\`, `%LOCALAPPDATA%\kiro-cli\`, `…\Kiro\bin\`,
   `%USERPROFILE%\.local\bin\`, each also with a `bin\` variant), and raises a
   `KiroCliError` naming everywhere it looked. The prompt is fed to
@@ -22,6 +23,15 @@ AI-powered git commit message generator with GUI and CLI interfaces.
   shell, no argument-length limit. Resolution always yields an **absolute** path,
   which matters on Windows: `subprocess` (CreateProcess) can launch a `.cmd`/`.bat`
   shim by full path but cannot find one via PATH lookup itself.
+  **Kiro is installed only on the user's work PC**, so nothing Kiro-related can be reproduced on the home PC.
+  **Two-install trap (seen 2026-11-03, work PC):** a machine can have both `C:\Program Files (x86)\Kiro-Cli\kiro-cli.exe`
+  and `%LOCALAPPDATA%\kiro-cli\kiro-cli.exe`, with the first earlier on PATH. With Kiro sessions already
+  running from the `AppData\Local` copy, the `Program Files (x86)` copy exits 1 with
+  `error: Access is denied. (os error 5)` from a cmd prompt, while the `AppData\Local` copy runs fine alongside
+  them. **Fix:** paste `%LOCALAPPDATA%\kiro-cli\kiro-cli.exe` into Settings → Provider → Kiro CLI; the status line
+  under the field shows the exe Generate will run. This replaced an `AI_COMMIT_KIRO_CLI` `setx` workaround, which
+  depended on the launching process's environment: a GUI started from a terminal opened before `setx` still failed.
+  Why the `Program Files (x86)` copy fails is unverified (a copy-over of a running exe is the guess).
 
 Default model: `qwen3-coder:480b-cloud` (configurable via settings or `AI_COMMIT_MODEL` env var)
 

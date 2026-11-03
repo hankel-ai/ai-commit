@@ -65,6 +65,7 @@ python ai-commit-gui.py --model mistral --poll 15
 - **Editable messages**: commit message input is always editable
 - **Auto-generate**: toggle to automatically generate messages when changes are detected
 - **System tray**: close button hides to tray; left-click the tray icon toggles the window (show to front / hide again); right-click for Show / Hide or Quit. On Windows, a dark wedge rotates behind the icon while any automatic or manual refresh runs
+- **Kiro CLI path**: Settings → Provider → Kiro CLI selects which `kiro-cli` to run, for machines with more than one install. Blank finds it automatically
 - **Always-on-top**: compact window stays visible while you work
 - **Drag-to-move**: custom title bar with drag support
 - **Type to filter**: start typing and every repo whose name doesn't contain the text is hidden (case-insensitive, matches anywhere in the name). Backspace widens, Esc shows everything again; the filter stays until you clear it.

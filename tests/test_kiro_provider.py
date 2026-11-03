@@ -164,6 +164,85 @@ def test_env_override_pointing_nowhere_says_so():
             os.environ[ai_commit_core.KIRO_CLI_EXE_ENV] = prev
 
 
+def _with_env_override(value, body):
+    prev = os.environ.get(ai_commit_core.KIRO_CLI_EXE_ENV)
+    if value is None:
+        os.environ.pop(ai_commit_core.KIRO_CLI_EXE_ENV, None)
+    else:
+        os.environ[ai_commit_core.KIRO_CLI_EXE_ENV] = value
+    try:
+        body()
+    finally:
+        if prev is None:
+            os.environ.pop(ai_commit_core.KIRO_CLI_EXE_ENV, None)
+        else:
+            os.environ[ai_commit_core.KIRO_CLI_EXE_ENV] = prev
+
+
+def test_configured_path_wins_over_env():
+    tmp = tempfile.mkdtemp(prefix="kiro-stub-")
+    try:
+        configured = _write_stub(tmp, "configured", "exit /b 0\n", "exit 0\n")
+        from_env = _write_stub(tmp, "from-env", "exit /b 0\n", "exit 0\n")
+
+        def body():
+            assert ai_commit_core.resolve_kiro_cli(configured) == configured
+            # Quotes arrive when a path is pasted from Explorer's "Copy as path".
+            assert ai_commit_core.resolve_kiro_cli(f'"{configured}"') == configured
+            # Blank means "not configured", so the old order still applies.
+            assert ai_commit_core.resolve_kiro_cli("") == from_env
+            assert ai_commit_core.resolve_kiro_cli("   ") == from_env
+
+        _with_env_override(from_env, body)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_configured_path_expands_variables():
+    tmp = tempfile.mkdtemp(prefix="kiro-stub-")
+    os.environ["AI_COMMIT_TEST_DIR"] = tmp
+    try:
+        exe = _write_stub(tmp, "kiro-cli", "exit /b 0\n", "exit 0\n")
+        typed = os.path.join("%AI_COMMIT_TEST_DIR%" if IS_WIN else "$AI_COMMIT_TEST_DIR",
+                             os.path.basename(exe))
+        assert ai_commit_core.resolve_kiro_cli(typed) == exe
+    finally:
+        os.environ.pop("AI_COMMIT_TEST_DIR", None)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_configured_path_missing_does_not_fall_through():
+    """A typo must surface, not silently run some other kiro-cli on the machine."""
+    tmp = tempfile.mkdtemp(prefix="kiro-stub-")
+    try:
+        from_env = _write_stub(tmp, "from-env", "exit /b 0\n", "exit 0\n")
+        missing = os.path.join(tmp, "nope.exe")
+
+        def body():
+            try:
+                ai_commit_core.resolve_kiro_cli(missing)
+            except ai_commit_core.KiroCliError as exc:
+                assert missing in str(exc), exc
+                assert "does not exist" in str(exc), exc
+            else:
+                raise AssertionError("expected KiroCliError")
+
+        _with_env_override(from_env, body)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_generate_message_runs_the_configured_exe():
+    tmp = tempfile.mkdtemp(prefix="kiro-stub-")
+    try:
+        exe, _argv, _stdin = _echo_stub(tmp)
+        out = ai_commit_core.generate_message(
+            "diff", {"provider": "kiro", "model": "m", "url": "", "kiro_cli": exe})
+        assert out == "feat(kiro): native windows call", out
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_candidates_are_absolute_windows_locations():
     if not IS_WIN:
         print("skip  test_candidates_are_absolute_windows_locations (not Windows)")

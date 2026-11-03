@@ -1541,12 +1541,22 @@ def _kiro_cli_candidates():
     return out
 
 
-def resolve_kiro_cli():
+def resolve_kiro_cli(configured=""):
     """Return the path to the native kiro-cli executable.
 
-    Order: AI_COMMIT_KIRO_CLI override -> PATH -> known install locations.
+    Order: *configured* (the GUI setting) -> AI_COMMIT_KIRO_CLI override -> PATH ->
+    known install locations. A configured path that is missing raises instead of
+    falling through, so a typo can't silently run another kiro-cli on the machine.
     Raises KiroCliError naming everywhere that was searched if none exists.
     """
+    configured = os.path.expandvars((configured or "").strip().strip('"'))
+    if configured:
+        if Path(configured).is_file():
+            return configured
+        raise KiroCliError(
+            f"Kiro CLI path in Settings points at '{configured}', which does not exist."
+        )
+
     override = os.environ.get(KIRO_CLI_EXE_ENV, "").strip().strip('"')
     if override:
         if Path(override).is_file():
@@ -1631,7 +1641,8 @@ def generate_message(diff, config):
     """Dispatch to the configured AI provider."""
     provider = config.get("provider", "ollama")
     if provider == "kiro":
-        return generate_message_kiro(diff, config["model"])
+        exe = resolve_kiro_cli(config.get("kiro_cli", ""))
+        return generate_message_kiro(diff, config["model"], exe=exe)
     return generate_message_ollama(diff, config["model"], config["url"])
 
 
