@@ -64,7 +64,7 @@ python ai-commit-gui.py --model mistral --poll 15
 - **Per-repo controls**: Generate, Accept & Push, Regenerate buttons for each repo
 - **Editable messages**: commit message input is always editable
 - **Auto-generate**: toggle to automatically generate messages when changes are detected
-- **System tray**: close button hides to tray; left-click the tray icon toggles the window (show to front / hide again); right-click for Show / Hide or Quit
+- **System tray**: close button hides to tray; left-click the tray icon toggles the window (show to front / hide again); right-click for Show / Hide or Quit. On Windows, a dark wedge rotates behind the icon while any automatic or manual refresh runs
 - **Always-on-top**: compact window stays visible while you work
 - **Drag-to-move**: custom title bar with drag support
 - **Type to filter**: start typing and every repo whose name doesn't contain the text is hidden (case-insensitive, matches anywhere in the name). Backspace widens, Esc shows everything again; the filter stays until you clear it.
@@ -131,6 +131,7 @@ ai-commit-gui.py        # Dear PyGui GUI application
 gh_workflows.py         # GitHub Actions API client (run detection, log fetching)
 gh_workflow_viewer.py   # Standalone Actions viewer window (launched as subprocess)
 git_proxy.py            # Read-only Git Smart HTTP server for the LAN (opt-in)
+tray_animation.py       # Tray icon drawing and the refresh animation
 requirements.txt        # GUI dependencies (dearpygui, pystray, Pillow)
 ```
 

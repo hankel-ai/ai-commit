@@ -2,6 +2,7 @@
 """AI Commit Monitor GUI -- Dear PyGui desktop app for monitoring git repos."""
 
 import argparse
+import functools
 import json
 import os
 import queue
@@ -74,6 +75,12 @@ import webbrowser
 
 import activity_log
 import git_proxy
+from tray_animation import (
+    RefreshActivity,
+    TrayAnimator,
+    draw_icon_background,
+    draw_icon_glyph,
+)
 from ai_commit_core import (
     STATUS_LABELS,
     KiroCliError,
@@ -392,6 +399,7 @@ ui_queue = queue.Queue()
 # Serves UI actions (generate, commit, pull, ...). The poll does NOT fan out
 # onto this pool -- see _run_poll_batch for why.
 executor = ThreadPoolExecutor(max_workers=4)
+_refresh_activity = RefreshActivity()
 
 # Upper bound for the "Poll threads" setting. Measured on Windows (63 repos):
 # the network calls (git fetch, gh repo view) top out around 3-3.5x at 4-8
@@ -500,17 +508,8 @@ def _generate_icon():
 
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    # Background: rounded blue square
-    draw.rounded_rectangle([2, 2, 62, 62], radius=12, fill=(100, 140, 230, 255))
-    # Git branch: vertical line with two commit dots
-    draw.line([(32, 14), (32, 50)], fill=(255, 255, 255, 220), width=3)
-    draw.ellipse([25, 12, 39, 26], fill=(255, 255, 255, 240))  # top commit
-    draw.ellipse([25, 38, 39, 52], fill=(255, 255, 255, 240))  # bottom commit
-    # Inner dots (the commit "holes")
-    draw.ellipse([29, 16, 35, 22], fill=(100, 140, 230, 255))
-    draw.ellipse([29, 42, 35, 48], fill=(100, 140, 230, 255))
-    # Side branch line
-    draw.line([(32, 20), (44, 30), (44, 38), (38, 44)], fill=(255, 255, 255, 200), width=2)
+    draw_icon_background(draw)
+    draw_icon_glyph(draw)
 
     _icon_image = img
 
@@ -1025,6 +1024,19 @@ def _poll_streamer(pending):
     return on_result
 
 
+def _tracks_refresh(fn):
+    """Spin the tray icon while *fn* runs, including when it raises."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        _refresh_activity.begin()
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _refresh_activity.end()
+    return wrapper
+
+
+@_tracks_refresh
 def bg_poll_repos(force=False):
     """Discover repos and get status for each. Posts results to ui_queue.
 
@@ -1140,6 +1152,7 @@ def bg_poll_repos(force=False):
     ui_queue.put(("poll_result", results, non_git_results, force))
 
 
+@_tracks_refresh
 def bg_refresh_single_repo(repo_name, force=False):
     """Re-poll a single repo and post its updated info to ui_queue.
 
@@ -1492,6 +1505,7 @@ def bg_push_override(repo_name, branch=""):
                       branch))
 
 
+@_tracks_refresh
 def bg_refresh_then_generate(repo_name):
     """Refresh repo status then generate a commit message.
 
@@ -3273,6 +3287,7 @@ _has_tray = False
 _tray_alert_active = False
 _tray_icon_normal = None
 _tray_icon_alert = None
+_tray_animator = None  # Windows only; owns every icon write once running
 
 
 def _make_alert_icon(base_img):
@@ -3291,6 +3306,9 @@ def _make_alert_icon(base_img):
 def _set_tray_alert(on):
     """Toggle the tray icon between normal and alert (orange dot) variants."""
     global _tray_alert_active
+    if _tray_animator:
+        _tray_animator.set_alert(on)
+        return
     if not tray_icon or not _tray_icon_normal:
         return
     if on and not _tray_alert_active:
@@ -3304,7 +3322,7 @@ def _set_tray_alert(on):
 
 
 def setup_tray():
-    global tray_icon, _has_tray, _tray_icon_normal, _tray_icon_alert
+    global tray_icon, _has_tray, _tray_icon_normal, _tray_icon_alert, _tray_animator
     try:
         import pystray
         from PIL import Image
@@ -3324,6 +3342,8 @@ def setup_tray():
 
     def on_quit(icon, item):
         ui_queue.put(("tray_quit", None))
+        if _tray_animator:
+            _tray_animator.stop()
         icon.stop()
 
     menu = pystray.Menu(
@@ -3334,6 +3354,11 @@ def setup_tray():
     _has_tray = True
     t = threading.Thread(target=tray_icon.run, daemon=True)
     t.start()
+    if sys.platform == "win32":
+        _tray_animator = TrayAnimator(
+            tray_icon, _refresh_activity, img, _make_alert_icon,
+            "AI Commit Monitor", "AI Commit Monitor - changes detected")
+        _tray_animator.start()
 
 
 # ---------------------------------------------------------------------------
@@ -5808,6 +5833,8 @@ def main():
     if _git_proxy is not None:
         _git_proxy.stop()
     executor.shutdown(wait=False)
+    if _tray_animator:
+        _tray_animator.stop()
     if tray_icon:
         try:
             tray_icon.stop()
