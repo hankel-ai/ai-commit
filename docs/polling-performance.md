@@ -204,8 +204,11 @@ bandwidth or the GIL. Past ~8 threads there is nothing left to win, which is why
   cycle down — the old serial loop had no guard, so one unreadable repo meant
   **no `poll_result` at all** and a UI stuck on `...`.
 - Visibility (`gh repo view`) is cached in the settings JSON
-  (`AppState.visibility_cache`, `repo_key -> "PUBLIC"/"PRIVATE"/""`), so it is
-  paid once per repo ever rather than once per launch. Membership, not
+  (`AppState.visibility_cache`,
+  `repo_key -> {"remote": url, "visibility": "PUBLIC"/"PRIVATE"/""}`), so it is
+  paid once per repo ever rather than once per launch. An entry only counts for
+  the remote it was answered for, and a repo with no remote is always `""` --
+  the key is the path, and a different repo can take over a path. Membership, not
   truthiness, is the hit test — a cached `""` (GitLab, no remote, gh missing)
   must also stick. `repo_force` (manual Refresh / force-active) re-asks and
   overwrites. Workers only mark it dirty; the `poll_result` handler persists it,

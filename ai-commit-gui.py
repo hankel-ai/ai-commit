@@ -372,7 +372,7 @@ class AppState:
     recent_days: int = 14  # a commit within this many days counts as "recent"
     idle_poll_interval: int = 900  # seconds between polls of idle-tier repos
     idle_last_poll: dict = field(default_factory=dict)  # repo_key -> last idle-poll epoch (transient)
-    visibility_cache: dict = field(default_factory=dict)  # repo_key -> "PUBLIC"/"PRIVATE"/"" (persisted; saves a `gh repo view` per repo per launch)
+    visibility_cache: dict = field(default_factory=dict)  # repo_key -> {"remote": url, "visibility": "PUBLIC"/"PRIVATE"/""} (persisted; saves a `gh repo view` per repo per launch; only valid for that remote)
     visibility_cache_dirty: bool = False  # a poll worker wrote to the cache -> main thread persists it
     last_results: dict = field(default_factory=dict)  # last poll_result payload (for no-poll re-render)
     last_non_git: dict = field(default_factory=dict)  # last non-git payload (for no-poll re-render)
@@ -873,15 +873,29 @@ def _repo_visibility_cached(rp, repo_key, existing, repo_force, remote_url):
     forced poll (manual Refresh / force-active repo) always re-asks and
     overwrites, which is the escape hatch when a repo flips visibility or
     gains a GitHub remote.
+
+    Entries are ``{"remote": url, "visibility": v}`` and only count for the
+    remote they were answered for: a different repo can take over the same
+    path (a public clone moved out, a fresh remote-less ``git init`` in its
+    place), and a path-only cache kept badging that new repo PUBLIC. Legacy
+    bare-string entries carry no remote, so they are a miss and get upgraded.
+    A repo with no remote is always "" -- no cache can make it public.
     """
-    if not repo_force:
-        if existing and existing.visibility:
-            return existing.visibility
-        if repo_key in app.visibility_cache:
-            return app.visibility_cache[repo_key]
-    visibility = get_repo_visibility(rp) if remote_url else ""
-    if app.visibility_cache.get(repo_key, object()) != visibility:
-        app.visibility_cache[repo_key] = visibility
+    if not remote_url:
+        visibility = ""
+    else:
+        if not repo_force:
+            if (existing and existing.visibility
+                    and existing.remote_url == remote_url):
+                return existing.visibility
+            cached = app.visibility_cache.get(repo_key)
+            if (isinstance(cached, dict)
+                    and cached.get("remote") == remote_url):
+                return cached.get("visibility", "")
+        visibility = get_repo_visibility(rp)
+    new_entry = {"remote": remote_url, "visibility": visibility}
+    if app.visibility_cache.get(repo_key) != new_entry:
+        app.visibility_cache[repo_key] = new_entry
         # Persisting touches the viewport, so it has to happen on the main
         # thread -- the poll_result handler does it once per cycle.
         app.visibility_cache_dirty = True
