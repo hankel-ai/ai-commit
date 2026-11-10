@@ -15,7 +15,7 @@ if not exist "%VENV_PY%" (
 )
 
 rem Self-heal: reinstall if any dependency is missing.
-"%VENV_PY%" -c "import dearpygui, pystray, PIL" 2>nul || (
+"%VENV_PY%" -c "import dearpygui, pystray, PIL, truststore" 2>nul || (
     echo [setup] Dependencies missing or changed, reinstalling...
     "%VENV_PY%" -m pip install -r requirements.txt || goto :fail
 )

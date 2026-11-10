@@ -136,16 +136,26 @@ def _api_get_raw(url, token):
         raise
 
 
+class GhApiError(Exception):
+    """Every GitHub API request in a detection window failed (TLS, network, HTTP)."""
+
+
 def detect_runs_for_commit(owner, repo, sha, token, *,
-                           timeout=45, poll_interval=2.0, cancel_event=None):
+                           timeout=45, poll_interval=2.0, cancel_event=None,
+                           raise_on_error=False):
     """Poll GitHub API until workflow runs appear for the given commit SHA.
 
     Returns a list of Run dataclasses. Empty list if none found within timeout.
+    With ``raise_on_error``, a window in which NO request succeeded raises
+    GhApiError with the last error instead of returning [] -- otherwise a
+    certificate or network failure is indistinguishable from "no runs".
     """
     deadline = time.monotonic() + timeout
     seen_ids = set()
     runs = []
     settle_polls = 0
+    any_ok = False
+    last_error = None
 
     while time.monotonic() < deadline:
         if cancel_event and cancel_event.is_set():
@@ -156,7 +166,9 @@ def detect_runs_for_commit(owner, repo, sha, token, *,
                 f"/repos/{owner}/{repo}/actions/runs?head_sha={sha}&per_page=20",
                 token,
             )
-        except (urllib.error.URLError, OSError):
+            any_ok = True
+        except (urllib.error.URLError, OSError) as exc:
+            last_error = exc
             time.sleep(poll_interval)
             continue
 
@@ -183,6 +195,8 @@ def detect_runs_for_commit(owner, repo, sha, token, *,
 
         time.sleep(poll_interval)
 
+    if raise_on_error and not runs and not any_ok and last_error is not None:
+        raise GhApiError(str(getattr(last_error, "reason", None) or last_error))
     return runs
 
 

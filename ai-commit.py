@@ -100,6 +100,8 @@ def parse_args():
 
 
 def main():
+    import os_trust
+    os_trust.enable()
     args = parse_args()
     target = Path(args.folder).resolve()
     config = {"provider": args.provider, "model": args.model, "url": args.url}

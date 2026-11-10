@@ -560,6 +560,8 @@ class Viewer:
 # ---------------------------------------------------------------------------
 
 def main():
+    import os_trust
+    os_trust.enable()
     if len(sys.argv) < 2:
         print("Usage: gh_workflow_viewer.py <data.json | ->")
         sys.exit(1)

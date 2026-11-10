@@ -137,6 +137,7 @@ from ai_commit_core import (
 
 import chime
 from gh_workflows import (
+    GhApiError,
     detect_runs_for_commit,
     fetch_workflow_yaml,
     get_gh_token,
@@ -1408,7 +1409,14 @@ def _launch_workflow_viewer(repo_name, rs):
         ui_queue.put(("workflow_check", repo_name, "no_remote"))
         return
 
-    runs = detect_runs_for_commit(owner, repo, sha, token, timeout=30)
+    try:
+        runs = detect_runs_for_commit(owner, repo, sha, token, timeout=30,
+                                      raise_on_error=True)
+    except GhApiError as exc:
+        activity_log.log_event(f"Actions check failed: {exc}", repo=repo_name,
+                               category=activity_log.CAT_EVENT)
+        ui_queue.put(("workflow_check", repo_name, f"error:{exc}"))
+        return
     if not runs:
         ui_queue.put(("workflow_check", repo_name, "no_runs"))
         return
@@ -4969,11 +4977,15 @@ def process_queue():
                     text = "Pushed - Actions check skipped (no gh CLI token)"
                 elif reason == "no_remote":
                     text = "Pushed - Actions check skipped (no remote/SHA)"
+                elif reason.startswith("error:"):
+                    text = "Pushed - Actions check failed: " + reason[len("error:"):]
                 else:
                     text = ""
                 if text:
-                    dpg.set_value(rs.status_tag, text)
-                    dpg.configure_item(rs.status_tag, color=COL_DIM)
+                    dpg.set_value(rs.status_tag, _wrap_for_display(text))
+                    dpg.configure_item(
+                        rs.status_tag,
+                        color=COL_RED if reason.startswith("error:") else COL_DIM)
 
         elif kind == "repo_loading":
             _, repo_key, repo_display_name = msg
@@ -5580,6 +5592,8 @@ def _acquire_instance_lock():
 
 
 def main():
+    import os_trust
+    os_trust.enable()
     global green_btn_theme, orange_btn_theme, link_btn_theme, remove_btn_theme, pull_btn_theme, _pending_topmost
 
     _acquire_instance_lock()
