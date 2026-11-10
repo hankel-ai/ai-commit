@@ -1496,6 +1496,91 @@ def generate_message_ollama(diff, model, base_url):
         raise OllamaError(f"Unexpected response from Ollama: {exc}") from exc
 
 
+class LiteLLMError(OllamaError):
+    """Raised when an OpenAI-compatible (LiteLLM) call fails.
+
+    Subclasses OllamaError so every existing ``except OllamaError`` path in the
+    GUI and CLI surfaces it the same way.
+    """
+
+
+def litellm_chat_url(base_url):
+    """Chat-completions URL for an OpenAI-compatible base URL, with or without /v1."""
+    base = (base_url or "").strip().rstrip("/")
+    if base.endswith("/v1"):
+        return f"{base}/chat/completions"
+    return f"{base}/v1/chat/completions"
+
+
+def resolve_litellm_api_key(configured=""):
+    """API key for the litellm provider: setting -> process env -> Windows user env.
+
+    The last step reads ``HKCU\\Environment`` directly. A process inherits its
+    environment at launch, so a GUI started from a terminal or launcher that was
+    opened before the variable was set never sees it in ``os.environ`` (seen
+    2026-11-10: "No api key passed in" from a GUI started minutes after the
+    variable was set). The registry always holds the current value.
+    """
+    if configured:
+        return configured
+    key = os.environ.get("AI_COMMIT_API_KEY", "")
+    if key or os.name != "nt":
+        return key
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as reg:
+            value, _ = winreg.QueryValueEx(reg, "AI_COMMIT_API_KEY")
+        return str(value or "")
+    except OSError:
+        return ""
+
+
+def generate_message_litellm(diff, model, base_url, api_key=""):
+    """Call an OpenAI-compatible /v1/chat/completions endpoint (LiteLLM proxy).
+
+    ``api_key`` falls back via ``resolve_litellm_api_key``. Raises LiteLLMError
+    on any failure.
+    """
+    api_key = resolve_litellm_api_key(api_key)
+    url = litellm_chat_url(base_url)
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": diff},
+        ],
+    }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        content = body["choices"][0]["message"].get("content") or ""
+        if not content.strip():
+            raise LiteLLMError(f"Model '{model}' returned empty content.")
+        return content.strip()
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            pass
+        if exc.code in (401, 403):
+            raise LiteLLMError(
+                f"LiteLLM rejected the API key (HTTP {exc.code}). Set it in Settings -> "
+                f"Provider -> API key, or the AI_COMMIT_API_KEY env var.\n{detail}"
+            ) from exc
+        raise LiteLLMError(f"LiteLLM returned HTTP {exc.code}: {exc.reason}\n{detail}") from exc
+    except urllib.error.URLError as exc:
+        raise LiteLLMError(f"Could not reach LiteLLM at {base_url}\n({exc})") from exc
+    except (KeyError, IndexError, json.JSONDecodeError) as exc:
+        raise LiteLLMError(f"Unexpected response from LiteLLM: {exc}") from exc
+
+
 class KiroCliError(Exception):
     """Raised when kiro-cli call fails."""
     pass
@@ -1643,6 +1728,10 @@ def generate_message(diff, config):
     if provider == "kiro":
         exe = resolve_kiro_cli(config.get("kiro_cli", ""))
         return generate_message_kiro(diff, config["model"], exe=exe)
+    if provider == "litellm":
+        return generate_message_litellm(
+            diff, config["model"], config["url"], config.get("api_key", ""),
+        )
     return generate_message_ollama(diff, config["model"], config["url"])
 
 

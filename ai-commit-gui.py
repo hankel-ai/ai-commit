@@ -362,6 +362,7 @@ class AppState:
     provider: str = "ollama"
     ollama_url: str = "http://localhost:11434"
     kiro_cli_path: str = ""  # blank = find kiro-cli automatically
+    api_key: str = ""  # litellm provider; blank = AI_COMMIT_API_KEY env var
     last_poll: float = 0.0
     paused: bool = False
     actions_popup_enabled: bool = True
@@ -476,6 +477,7 @@ def _save_settings():
             "provider": app.provider,
             "ollama_url": app.ollama_url,
             "kiro_cli_path": app.kiro_cli_path,
+            "api_key": app.api_key,
             "watched_folders": [str(f) for f in app.watched_folders],
             "actions_popup_enabled": app.actions_popup_enabled,
             "chime_on_completion": app.chime_on_completion,
@@ -1223,7 +1225,7 @@ def bg_generate_message(repo_name):
             ui_queue.put(("gen_result", repo_name, "", detail))
             return
         config = {"provider": app.provider, "model": app.model, "url": app.ollama_url,
-                  "kiro_cli": app.kiro_cli_path}
+                  "kiro_cli": app.kiro_cli_path, "api_key": app.api_key}
         activity_log.log_event(
             f"Generate commit message ({app.provider}/{app.model})",
             repo=repo_name, category=activity_log.CAT_AI,
@@ -2123,11 +2125,17 @@ def cb_open_settings(sender, app_data):
         dpg.add_spacer(height=6)
         dpg.add_text("Provider", color=COL_ACCENT)
         with dpg.group(horizontal=True):
-            dpg.add_text("Ollama URL:", color=COL_DIM)
+            dpg.add_text("Base URL:", color=COL_DIM)
             dpg.add_input_text(tag="settings_ollama_url",
                                default_value=app.ollama_url, width=-1,
                                callback=cb_ollama_url_changed, on_enter=True,
                                hint="http://localhost:11434")
+        with dpg.group(horizontal=True):
+            dpg.add_text("API key:", color=COL_DIM)
+            dpg.add_input_text(tag="settings_api_key", default_value=app.api_key,
+                               width=-1, password=True, on_enter=True,
+                               callback=cb_api_key_changed,
+                               hint="litellm only; blank = AI_COMMIT_API_KEY")
         with dpg.group(horizontal=True):
             dpg.add_text("Kiro CLI:", color=COL_DIM)
             dpg.add_input_text(tag="settings_kiro_cli",
@@ -3312,6 +3320,11 @@ def _update_kiro_cli_status():
         text, color = str(exc).splitlines()[0], COL_RED
     dpg.set_value("settings_kiro_status", text)
     dpg.configure_item("settings_kiro_status", color=color)
+
+
+def cb_api_key_changed(sender, app_data):
+    app.api_key = dpg.get_value(sender).strip()
+    _save_settings()
 
 
 def cb_kiro_cli_changed(sender, app_data):
@@ -5525,7 +5538,7 @@ def parse_args():
     parser.add_argument("folder", nargs="*",
                         help="Folder(s) containing git repos to monitor")
     parser.add_argument("--provider", default=os.environ.get("AI_COMMIT_PROVIDER", "ollama"),
-                        choices=["kiro", "ollama"],
+                        choices=["kiro", "litellm", "ollama"],
                         help="AI provider (default: ollama)")
     parser.add_argument("--model", default=os.environ.get("AI_COMMIT_MODEL", "qwen3-coder:480b-cloud"),
                         help="Model name (default: qwen3-coder:480b-cloud)")
@@ -5604,6 +5617,7 @@ def main():
         if "ollama_url" in saved:
             app.ollama_url = saved["ollama_url"]
         app.kiro_cli_path = saved.get("kiro_cli_path", "")
+        app.api_key = saved.get("api_key", "")
         app.actions_popup_enabled = saved.get("actions_popup_enabled", True)
         app.chime_on_completion = saved.get("chime_on_completion", False)
         app.show_non_git_folders = saved.get("show_non_git_folders", True)
@@ -5755,8 +5769,8 @@ def main():
         dpg.add_separator()
         with dpg.group(horizontal=True):
             dpg.add_text("Provider:", color=COL_DIM)
-            dpg.add_combo(["kiro", "ollama"], tag="provider_combo",
-                          default_value=app.provider, width=80,
+            dpg.add_combo(["kiro", "litellm", "ollama"], tag="provider_combo",
+                          default_value=app.provider, width=90,
                           callback=cb_provider_changed)
             dpg.add_text("Model:", color=COL_DIM)
             dpg.add_input_text(tag="model_input", default_value=app.model,

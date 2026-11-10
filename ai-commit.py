@@ -77,7 +77,7 @@ def parse_args():
     )
     parser.add_argument(
         "--provider", default=os.environ.get("AI_COMMIT_PROVIDER", "ollama"),
-        choices=["kiro", "ollama"],
+        choices=["kiro", "litellm", "ollama"],
         help="AI provider (default: ollama, env: AI_COMMIT_PROVIDER)",
     )
     parser.add_argument(
