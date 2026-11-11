@@ -515,14 +515,557 @@ def fetch_remote(cwd):
 def get_git_global_user():
     """Return (global_name, global_email) from ``git config --global``.
 
-    Read once at GUI startup for the toolbar identity label -- not per repo,
-    so it doesn't flood the activity log.
+    The identity guard's "all other hosts" reference (see
+    :func:`check_commit_identity`). Read at commit/push time and when Settings
+    opens -- never per poll, so it doesn't flood the activity log.
     """
     rc_n, name, _ = run_git(["config", "--global", "user.name"], cwd=".")
     rc_e, email, _ = run_git(["config", "--global", "user.email"], cwd=".")
     global_name = name.strip() if rc_n == 0 else ""
     global_email = email.strip() if rc_e == 0 else ""
     return global_name, global_email
+
+
+# ---------------------------------------------------------------------------
+# Commit-identity guard
+# ---------------------------------------------------------------------------
+#
+# A pin says "commits for this remote host must be <name> <email>". A repo on
+# a pinned host that would commit (or push commits) as anyone else is BLOCKED;
+# a repo on any other host -- or with no remote -- is checked against the
+# global identity and only WARNED about. The checks never write git config;
+# a result carries the fix (``fix`` text, ``fix_args`` / ``needs_sync`` for
+# :func:`apply_identity_fix`). The pinned identity itself reaches git through
+# :func:`sync_identity_config`, which the app runs -- nobody edits ~/.gitconfig.
+#
+# Why the expected identity lives in ai-commit settings and is not derived from
+# git: `git config --global --includes` does NOT evaluate `hasconfig:` include
+# conditions (verified on git 2.43), so git cannot say what a repo *should*
+# resolve to. The pin is the reference the effective identity is checked
+# against.
+
+IDENTITY_BLOCK = "block"
+IDENTITY_WARN = "warn"
+
+_RESET_AUTHOR = "git commit --amend --no-edit --reset-author"
+
+
+def remote_host(url):
+    """Lower-case hostname of a remote URL, or ``""`` for a local path.
+
+    Strips scheme, embedded credentials and port: ``https://tok@Host:8443/x``,
+    ``git@host:o/r`` and ``ssh://git@host:22/o/r`` all yield ``host``.
+    """
+    url = (url or "").strip()
+    if not url:
+        return ""
+    m = re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://(?:[^@/]*@)?([^/:]+)", url)
+    if m:
+        return "" if url.lower().startswith("file:") else m.group(1).lower()
+    # scp-like [user@]host:path. Two+ chars before ':' rules out C:/ drives;
+    # a leading '/' or '.' is a filesystem path.
+    m = re.match(r"^(?:[^@/:]+@)?([^/:.][^/:]+):(?!//)", url)
+    if m and not url.startswith(("/", "\\", ".")):
+        return m.group(1).lower()
+    return ""
+
+
+def normalize_identity_pins(raw):
+    """Clean the persisted pin list: dict rows with a host, fields stripped.
+
+    A host typed as a full URL is reduced to its hostname. Rows without a host
+    (a half-filled Settings row) are dropped, as is anything not a dict.
+    """
+    if not isinstance(raw, list):
+        return []
+    pins = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        host = str(row.get("host") or "").strip()
+        if "://" in host or "@" in host:
+            host = remote_host(host)
+        host = host.lower()
+        if not host:
+            continue
+        pins.append({"host": host,
+                     "name": str(row.get("name") or "").strip(),
+                     "email": str(row.get("email") or "").strip(),
+                     "login": str(row.get("login") or "").strip()})
+    return pins
+
+
+def find_identity_pin(pins, host):
+    """The pin for *host* (case-insensitive), or ``None``."""
+    host = (host or "").lower()
+    if not host:
+        return None
+    for pin in pins or []:
+        if pin.get("host") == host:
+            return pin
+    return None
+
+
+def _origin_raw_url(cwd):
+    """``remote.origin.url`` exactly as configured.
+
+    Not ``git remote get-url``: that expands ``url.*.insteadOf``, which would
+    turn a pinned host into whatever it is rewritten to.
+    """
+    rc, out, _ = run_git(["config", "--get", "remote.origin.url"], cwd=cwd)
+    return out.strip() if rc == 0 else ""
+
+
+def _config_with_origin(cwd, key):
+    """``(value, origin)`` for *key* as git resolves it in *cwd*."""
+    rc, out, _ = run_git(["config", "--show-origin", "--get", key], cwd=cwd)
+    if rc != 0 or not out.strip():
+        return "", ""
+    line = out.strip().splitlines()[-1]
+    origin, _, value = line.partition("\t")
+    return value.strip(), origin.strip()
+
+
+def _is_repo_local_origin(origin):
+    """True when a ``--show-origin`` value is this repo's own config file."""
+    path = origin[len("file:"):] if origin.startswith("file:") else ""
+    path = path.replace("\\", "/")
+    return path in (".git/config", ".git/config.worktree") or path.endswith(
+        ("/.git/config", "/.git/config.worktree"))
+
+
+def _display_origin(origin):
+    return origin[len("file:"):] if origin.startswith("file:") else origin
+
+
+def _expected_identity(cwd, pins, host=None):
+    """``{"level", "host", "name", "email"}`` the repo must match, or ``None``.
+
+    A pinned host -> that pin, BLOCK. Anything else -> the global identity,
+    WARN (``None`` if no global email is set: nothing to compare against).
+    """
+    if host is None:
+        host = remote_host(_origin_raw_url(cwd))
+    pin = find_identity_pin(normalize_identity_pins(pins), host)
+    if pin and pin["email"]:
+        return {"level": IDENTITY_BLOCK, "host": host,
+                "name": pin["name"], "email": pin["email"]}
+    name, email = get_git_global_user()
+    if not email:
+        return None
+    return {"level": IDENTITY_WARN, "host": host, "name": name, "email": email}
+
+
+def _fmt_ident(name, email):
+    return f"{name} <{email}>" if name else f"<{email}>"
+
+
+def _where(expected):
+    if expected["level"] == IDENTITY_BLOCK:
+        return f"required for {expected['host']}"
+    return "your global git identity"
+
+
+def check_commit_identity(cwd, pins, host=None):
+    """Would a commit in *cwd* be made as the expected identity?
+
+    Returns ``None`` when it would (or when the check cannot run -- a missing
+    directory), else a result dict: ``kind="commit"``, ``level``, ``host``,
+    ``expected``, ``actual``, ``fields`` (mismatched config keys), ``message``
+    and ``fix`` (shell commands, one per line). Email compares
+    case-insensitively; a pin with no name checks the email only.
+    """
+    try:
+        expected = _expected_identity(cwd, pins, host)
+        if expected is None:
+            return None
+        name, name_origin = _config_with_origin(cwd, "user.name")
+        email, email_origin = _config_with_origin(cwd, "user.email")
+    except OSError:
+        return None
+    fields = []
+    if email.lower() != expected["email"].lower():
+        fields.append(("user.email", email, email_origin, expected["email"]))
+    if expected["name"] and name != expected["name"]:
+        fields.append(("user.name", name, name_origin, expected["name"]))
+    if not fields:
+        return None
+    fixes, fix_args, needs_sync = [], [], False
+    for key, _value, origin, want in fields:
+        if _is_repo_local_origin(origin):
+            fixes.append(f"git config --unset {key}")
+            fix_args.append(["config", "--unset", key])
+        elif expected["level"] == IDENTITY_BLOCK:
+            fixes.append(f'git config {key} "{want}"')
+            needs_sync = True  # the managed include is missing or losing
+    sources = ", ".join(
+        f"{key.split('.')[1]} from {_display_origin(origin) or 'nowhere (unset)'}"
+        for key, _v, origin, _w in fields)
+    actual = _fmt_ident(name, email or "unset")
+    want = _fmt_ident(expected["name"], expected["email"])
+    if expected["level"] == IDENTITY_BLOCK:
+        message = (f"Commit blocked: {expected['host']} requires {want}, but "
+                   f"this repo would commit as {actual} ({sources}).")
+    else:
+        message = (f"This repo commits as {actual} ({sources}), not "
+                   f"{_where(expected)} {want}.")
+    return {"kind": "commit", "level": expected["level"],
+            "host": expected["host"],
+            "expected": {"name": expected["name"], "email": expected["email"]},
+            "actual": {"name": name, "email": email},
+            "fields": [f[0] for f in fields],
+            "message": message, "fix": "\n".join(fixes),
+            "fix_args": fix_args, "needs_sync": needs_sync}
+
+
+def apply_identity_fix(cwd, result, pins, hub_path=None):
+    """Apply a commit-check result's config fix; return the re-check.
+
+    Runs the repo-local ``git config --unset`` commands, then -- when the wrong
+    value came from outside the repo -- re-syncs the managed identity config
+    (:func:`sync_identity_config`) instead of pinning the repo locally. History
+    rewrites (push results) are never applied here.
+    """
+    if not result or result.get("kind") != "commit":
+        return result
+    for args in result.get("fix_args") or []:
+        run_git(list(args), cwd=cwd)
+    if result.get("needs_sync"):
+        sync_identity_config(pins, hub_path=hub_path)
+    return check_commit_identity(cwd, pins)
+
+
+def check_push_identity(cwd, pins, host=None, limit=500):
+    """Are the commits a push would send made by the expected identity?
+
+    The commits checked are those reachable from HEAD but from no
+    ``refs/remotes/origin/*`` ref. *host* overrides origin's host -- for
+    Create-Remote, where origin doesn't exist yet and the whole history is
+    about to go to that host. With no origin and no *host* there is nothing to
+    push, so the result is ``None``.
+
+    A commit is flagged when its **committer** differs from the expected
+    identity (every commit object made on this machine -- commit, amend,
+    rebase, cherry-pick -- carries the local committer), or when its **author**
+    is one of the user's *other* known identities (global or another pin):
+    that is the amend-after-fixing-config case, where ``--amend`` keeps the old
+    author. A colleague's authorship on a rebased commit is left alone.
+    """
+    try:
+        raw_url = _origin_raw_url(cwd)
+        if host is None and not raw_url:
+            return None
+        expected = _expected_identity(cwd, pins, host)
+        if expected is None:
+            return None
+        rc, out, _ = run_git(
+            ["log", "HEAD", "--not", "--remotes=origin", f"-n{int(limit)}",
+             "--format=%H%x00%P%x00%an%x00%ae%x00%cn%x00%ce"], cwd=cwd)
+    except OSError:
+        return None
+    if rc != 0:
+        return None  # unborn HEAD, or not a repo
+    want_email = expected["email"].lower()
+    others = {p["email"].lower() for p in normalize_identity_pins(pins)
+              if p["email"]}
+    _g_name, g_email = get_git_global_user()
+    if g_email:
+        others.add(g_email.lower())
+    others.discard(want_email)
+    commits = []
+    for line in out.splitlines():
+        parts = line.split("\0")
+        if len(parts) != 6:
+            continue
+        sha, parents, an, ae, cn, ce = parts
+        bad_committer = (ce.lower() != want_email
+                         or (expected["name"] and cn != expected["name"]))
+        if bad_committer or ae.lower() in others:
+            commits.append({"sha": sha, "parents": parents.split(),
+                            "author_name": an, "author_email": ae,
+                            "committer_name": cn, "committer_email": ce})
+    if not commits:
+        return None
+    oldest = commits[-1]  # git log lists newest first
+    if len(commits) == 1 and _is_head(cwd, oldest["sha"]):
+        rewrite = _RESET_AUTHOR
+    elif not oldest["parents"]:
+        rewrite = f'git rebase -r --root --exec "{_RESET_AUTHOR}"'
+    else:
+        rewrite = (f'git rebase -r {oldest["parents"][0][:12]} '
+                   f'--exec "{_RESET_AUTHOR}"')
+    want = _fmt_ident(expected["name"], expected["email"])
+    verb = "Push blocked" if expected["level"] == IDENTITY_BLOCK else "Heads up"
+    message = (f"{verb}: {len(commits)} unpushed commit(s) are not by {want} "
+               f"({_where(expected)}).")
+    fix = ("# make this repo commit as the right identity first, then:\n"
+           + rewrite)
+    return {"kind": "push", "level": expected["level"],
+            "host": expected["host"],
+            "expected": {"name": expected["name"], "email": expected["email"]},
+            "commits": commits, "message": message, "fix": fix}
+
+
+def _is_head(cwd, sha):
+    """True if full *sha* is the commit HEAD points at."""
+    rc, out, _ = run_git(["rev-parse", "HEAD"], cwd=cwd)
+    return rc == 0 and out.strip() == sha
+
+
+# ---------------------------------------------------------------------------
+# Identity pins -> git config (written by the app, never by hand)
+# ---------------------------------------------------------------------------
+#
+# Layout, all generated:
+#
+#   ~/.gitconfig   (one section appended, nothing else touched)
+#       [includeIf "hasconfig:remote.*.url:**"]
+#           path = ~/.config/ai-commit/git-identities.gitconfig     <- the hub
+#   hub            one includeIf per URL form of each pinned host, each
+#                  pointing at that host's identity file
+#   identity-<host>.gitconfig   [user] name / email
+#   managed.json   which credential usernames the app set, and what was
+#                  there before (restored when the pin is removed)
+#
+# The login (``credential.https://<host>.username``) goes straight into the
+# global config: a `git clone` has no remote yet, so a hasconfig include would
+# not apply to the credential lookup it makes.
+#
+# Every sync ends by asking git what a scratch repo on each pinned host
+# resolves to. A [user] block written after our section (later wins) is
+# repaired by moving our section to the end.
+
+IDENTITY_HUB_PATH = Path.home() / ".config" / "ai-commit" / "git-identities.gitconfig"
+_HUB_KEY = "includeIf.hasconfig:remote.*.url:**.path"
+_HUB_SECTION = "includeIf.hasconfig:remote.*.url:**"
+_HOST_URL_PATTERNS = (
+    "https://{h}/**", "https://*@{h}/**", "https://{h}:*/**", "https://*@{h}:*/**",
+    "ssh://{h}/**", "ssh://*@{h}/**", "ssh://{h}:*/**", "ssh://*@{h}:*/**",
+    "git@{h}:*/**",
+)
+_MIN_GIT_FOR_HASCONFIG = (2, 36)
+
+
+def _git_version():
+    rc, out, _ = run_git(["version"], cwd=".")
+    m = re.search(r"(\d+)\.(\d+)", out or "") if rc == 0 else None
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _host_file_name(host):
+    return "identity-" + re.sub(r"[^a-z0-9.-]", "_", host) + ".gitconfig"
+
+
+def _write_git_config_file(path, entries):
+    """Make *path* a git config file holding exactly *entries*.
+
+    ``entries`` are ``(key, value)`` pairs written with ``git config --file
+    --add`` so git does all quoting. The file is only replaced when its bytes
+    change, so a no-op sync leaves timestamps alone. Returns an error string or
+    ``""``.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".new")
+    try:
+        tmp.unlink()
+    except FileNotFoundError:
+        pass
+    tmp.write_text("# Generated by ai-commit (Settings > Commit Identity). "
+                   "Edits here are overwritten.\n", encoding="utf-8")
+    for key, value in entries:
+        rc, _out, err = run_git(["config", "--file", str(tmp), "--add", key, value],
+                                cwd=".")
+        if rc != 0:
+            tmp.unlink(missing_ok=True)
+            return f"git config --file failed for {key}: {err.strip()}"
+    new = tmp.read_bytes()
+    if path.exists() and path.read_bytes() == new:
+        tmp.unlink()
+    else:
+        os.replace(tmp, path)
+    return ""
+
+
+def _global_get(key):
+    rc, out, _ = run_git(["config", "--global", "--get", key], cwd=".")
+    return out.strip() if rc == 0 else None
+
+
+def _global_set(key, value):
+    if value is None:
+        run_git(["config", "--global", "--unset-all", key], cwd=".")
+    elif _global_get(key) != value:
+        run_git(["config", "--global", key, value], cwd=".")
+
+
+def _global_hub_values():
+    rc, out, _ = run_git(["config", "--global", "--get-all", _HUB_KEY], cwd=".")
+    return [v.strip() for v in out.splitlines() if v.strip()] if rc == 0 else []
+
+
+def _remove_global_hub(hub):
+    """Drop our include from the global config; the section too if now empty."""
+    if hub not in _global_hub_values():
+        return
+    run_git(["config", "--global", "--fixed-value", "--unset-all", _HUB_KEY, hub],
+            cwd=".")
+    if not _global_hub_values():
+        run_git(["config", "--global", "--remove-section", _HUB_SECTION], cwd=".")
+
+
+def _add_global_hub(hub):
+    if hub not in _global_hub_values():
+        run_git(["config", "--global", "--add", _HUB_KEY, hub], cwd=".")
+
+
+def _resolve_for_host(host, scratch):
+    """(name, email, email_origin) a fresh repo whose origin is on *host* gets."""
+    repo = Path(scratch) / _host_file_name(host)
+    run_git(["init", "-q", str(repo)], cwd=str(scratch))
+    run_git(["remote", "add", "origin", f"https://{host}/ai-commit/check.git"],
+            cwd=str(repo))
+    name, _ = _config_with_origin(str(repo), "user.name")
+    email, origin = _config_with_origin(str(repo), "user.email")
+    return name, email, origin
+
+
+def _load_manifest(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+_IDENTITY_SYNC_LOCK = threading.Lock()
+
+
+def sync_identity_config(pins, hub_path=None):
+    """Thread-safe wrapper: one sync at a time (they share files)."""
+    with _IDENTITY_SYNC_LOCK:
+        return _sync_identity_config(pins, hub_path)
+
+
+def _sync_identity_config(pins, hub_path=None):
+    """Make git config match *pins*: identity per host, plus login if given.
+
+    Idempotent; safe to run at every start and after every pin edit. Returns
+    ``{"ok": bool, "hosts": {host: "ok" | problem}, "lines": [status text],
+    "hub": path}``. Writes only the managed files, one section of the global
+    config, and the ``credential.https://<host>.username`` keys of pins that
+    carry a login.
+    """
+    hub_path = Path(hub_path or IDENTITY_HUB_PATH)
+    hub = hub_path.as_posix()
+    folder = hub_path.parent
+    manifest_path = folder / "managed.json"
+    pins = normalize_identity_pins(pins)
+    hosts, lines = {}, []
+
+    version = _git_version()
+    if version is not None and version < _MIN_GIT_FOR_HASCONFIG:
+        msg = ("git %d.%d is too old: per-host identities need git 2.36+"
+               % version)
+        return {"ok": False, "hosts": {p["host"]: msg for p in pins},
+                "lines": [msg], "hub": hub}
+
+    active = []
+    for pin in pins:
+        if not pin["email"]:
+            hosts[pin["host"]] = "needs an email"
+        else:
+            active.append(pin)
+
+    # 1. identity files + hub
+    folder.mkdir(parents=True, exist_ok=True)
+    keep = set()
+    hub_entries = []
+    for pin in active:
+        host_file = folder / _host_file_name(pin["host"])
+        keep.add(host_file.name)
+        entries = [("user.email", pin["email"])]
+        if pin["name"]:
+            entries.insert(0, ("user.name", pin["name"]))
+        err = _write_git_config_file(host_file, entries)
+        if err:
+            hosts[pin["host"]] = err
+            continue
+        for pattern in _HOST_URL_PATTERNS:
+            hub_entries.append(
+                (f"includeIf.hasconfig:remote.*.url:{pattern.format(h=pin['host'])}.path",
+                 host_file.as_posix()))
+    for stale in folder.glob("identity-*.gitconfig"):
+        if stale.name not in keep:
+            stale.unlink(missing_ok=True)
+
+    if hub_entries:
+        err = _write_git_config_file(hub_path, hub_entries)
+        if err:
+            lines.append(err)
+        _add_global_hub(hub)
+    else:
+        _remove_global_hub(hub)
+        hub_path.unlink(missing_ok=True)
+
+    # 2. credential usernames
+    manifest = _load_manifest(manifest_path)
+    logins = manifest.get("logins") if isinstance(manifest.get("logins"), dict) else {}
+    wanted = {p["host"]: p["login"] for p in active if p["login"]}
+    for host, login in wanted.items():
+        key = f"credential.https://{host}.username"
+        if host not in logins:
+            logins[host] = {"previous": _global_get(key)}
+        _global_set(key, login)
+        logins[host]["set"] = login
+    for host in [h for h in logins if h not in wanted]:
+        key = f"credential.https://{host}.username"
+        if _global_get(key) == logins[host].get("set"):
+            _global_set(key, logins[host].get("previous"))
+        del logins[host]
+    if logins:
+        manifest_path.write_text(json.dumps({"logins": logins}, indent=1),
+                                 encoding="utf-8")
+    else:
+        manifest_path.unlink(missing_ok=True)
+
+    # 3. verify with git itself; repair ordering once
+    if active:
+        import tempfile
+        scratch = tempfile.mkdtemp(prefix="ai-commit-ident-")
+        try:
+            def bad_hosts():
+                out = {}
+                for pin in active:
+                    if pin["host"] in hosts:
+                        continue
+                    name, email, origin = _resolve_for_host(pin["host"], scratch)
+                    if (email.lower() != pin["email"].lower()
+                            or (pin["name"] and name != pin["name"])):
+                        out[pin["host"]] = (f"not applied: git resolves "
+                                            f"{_fmt_ident(name, email or 'unset')} "
+                                            f"from {_display_origin(origin) or 'nowhere'}")
+                    shutil.rmtree(Path(scratch) / _host_file_name(pin["host"]),
+                                  ignore_errors=True)
+                return out
+            bad = bad_hosts()
+            if bad:
+                _remove_global_hub(hub)  # re-adding appends the section last
+                _add_global_hub(hub)
+                bad = bad_hosts()
+            hosts.update(bad)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    for pin in pins:
+        state = hosts.setdefault(pin["host"], "ok")
+        who = _fmt_ident(pin["name"], pin["email"] or "?")
+        login = f", login {pin['login']}" if pin["login"] else ""
+        lines.append(f"{pin['host']}: {who}{login} -- "
+                     + ("applied" if state == "ok" else state))
+    return {"ok": all(v == "ok" for v in hosts.values()) and not any(
+                l.startswith("git config --file failed") for l in lines),
+            "hosts": hosts, "lines": lines, "hub": hub}
 
 
 def get_active_github_account():

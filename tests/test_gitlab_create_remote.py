@@ -191,7 +191,12 @@ def _run_worker(work, url):
     rs = SimpleNamespace(path=work)
     m.app = m.AppState(repos={str(work): rs}, non_git_folders={})
     m.bg_create_gitlab_remote(str(work), url)
-    return q.get_nowait()
+    # The repo's local test identity differs from the global one, so the
+    # identity guard may post a (non-blocking) identity_check warning first.
+    while True:
+        msg = q.get_nowait()
+        if msg[0] != "identity_check":
+            return msg
 
 
 def test_worker_success():

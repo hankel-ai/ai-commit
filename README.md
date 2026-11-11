@@ -65,6 +65,8 @@ python ai-commit-gui.py --model mistral --poll 15
 - **Editable messages**: commit message input is always editable
 - **Auto-generate**: toggle to automatically generate messages when changes are detected
 - **System tray**: close button hides to tray; left-click the tray icon toggles the window (show to front / hide again); right-click for Show / Hide or Quit. On Windows, a dark wedge rotates behind the icon while any automatic or manual refresh runs
+- **Settings window**: opens as its own window beside the main one, sized to show every setting at once; changes apply immediately
+- **Commit identity**: Settings → Commit Identity pins a host (e.g. your work GitLab) to a name, email and optional login. ai-commit writes this into git config for you (one include in `~/.gitconfig`, managed files under `~/.config/ai-commit/`), so every repo on that host commits as that identity; a commit or push to a pinned host as anyone else is blocked, with an **Apply Fix** button for config problems. Other hosts only warn when they differ from your global identity. Needs git 2.36+
 - **Kiro CLI path**: Settings → Provider → Kiro CLI selects which `kiro-cli` to run, for machines with more than one install. Blank finds it automatically
 - **Always-on-top**: compact window stays visible while you work
 - **Drag-to-move**: custom title bar with drag support

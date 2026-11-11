@@ -1,9 +1,9 @@
-"""The Git Proxy settings are wired into the Settings window and take effect live.
+"""The Git Proxy settings take effect live when the Settings window changes them.
 
 Real Dear PyGui item creation (context only, no viewport) plus a real server:
-the proxy module's own suite proves the protocol works, but only a render test
-catches a checkbox that was never added, a callback that was never bound, or a
-toggle that changes app state without starting or stopping anything.
+the proxy module's own suite proves the protocol works; this proves a "set"
+message from the Settings window (settings_window.py, covered by
+test_settings_window.py) really starts/stops the server and reports status.
 
 Run: python tests/test_git_proxy_settings.py
 """
@@ -43,42 +43,12 @@ def _setup_context():
     m.green_btn_theme = m.create_button_theme((50, 130, 75))
 
 
-def _walk(tag, out):
-    for child_list in dpg.get_item_children(tag).values():
-        for child in child_list:
-            out.append(child)
-            _walk(child, out)
-
-
-def _labels(win):
-    """Every button/checkbox label plus every text item's value in the window.
-
-    Section headers are add_text values, not labels -- checking labels alone
-    would silently pass on a window that lost its heading.
-    """
-    items = []
-    _walk(win, items)
-    out = []
-    for item in items:
-        out.append(dpg.get_item_label(item) or "")
-        if dpg.get_item_type(item) == "mvAppItemType::mvText":
-            out.append(str(dpg.get_value(item) or ""))
-    return out
-
-
 def _free_port():
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
     sock.close()
     return port
-
-
-def _open_settings():
-    if dpg.does_item_exist("settings_window"):
-        dpg.delete_item("settings_window")
-    m.cb_open_settings(None, None)
-    return "settings_window"
 
 
 def test_defaults_are_off():
@@ -94,77 +64,62 @@ def test_port_clamping():
     check("clamp_valid", m._clamp_proxy_port("9000") == 9000)
 
 
-def test_settings_window_renders_the_section():
-    win = _open_settings()
-    labels = _labels(win)
-    check("section_header", any("Git Proxy" in l for l in labels))
-    check("enable_checkbox",
-          any("Serve watched repos over LAN" in l for l in labels))
-    check("copy_url_button", "Copy URL" in labels)
-    check("status_line_exists", dpg.does_item_exist("git_proxy_status"))
-    check("status_reads_off_when_disabled",
-          dpg.get_value("git_proxy_status") == "Off")
-    dpg.delete_item(win)
+def test_settings_status_reads_off_when_disabled():
+    m.app.git_proxy_enabled = False
+    m._apply_git_proxy()
+    status = m._settings_status()["git_proxy"]
+    check("status_reads_off_when_disabled", status == {"text": "Off", "url": ""})
 
 
 def test_toggle_starts_and_stops_the_server():
+    """The Settings window's checkbox arrives as a "set" message."""
     port = _free_port()
     m.app.git_proxy_port = port
-    win = _open_settings()
-
-    checkbox = None
-    items = []
-    _walk(win, items)
-    for item in items:
-        if "Serve watched repos over LAN" in (dpg.get_item_label(item) or ""):
-            checkbox = item
-            break
-    if checkbox is None:
-        check("enable_checkbox_found", False)
-        dpg.delete_item(win)
-        return
-
-    dpg.set_value(checkbox, True)
-    m.cb_git_proxy_enabled(checkbox, True)
-    check("app_state_enabled", m.app.git_proxy_enabled is True)
-    check("server_running", m._git_proxy is not None and m._git_proxy.is_running)
-    check("bound_requested_port",
-          m._git_proxy is not None and m._git_proxy.port == port)
-    status = dpg.get_value("git_proxy_status")
-    check("status_shows_url", "http://" in status)
-
-    probe = socket.socket()
-    probe.settimeout(5)
+    sent = []
+    real_send = m._settings_send
+    m._settings_send = sent.append
     try:
-        probe.connect(("127.0.0.1", port))
-        check("port_accepting", True)
-    except OSError:
-        check("port_accepting", False)
+        m._handle_settings_msg({"type": "set", "key": "git_proxy_enabled", "value": True})
+        check("app_state_enabled", m.app.git_proxy_enabled is True)
+        check("server_running", m._git_proxy is not None and m._git_proxy.is_running)
+        check("bound_requested_port",
+              m._git_proxy is not None and m._git_proxy.port == port)
+        pushed = [msg["status"]["git_proxy"] for msg in sent
+                  if msg.get("type") == "status" and "git_proxy" in msg["status"]]
+        check("status_sent_to_window", pushed and "http://" in pushed[-1]["text"]
+              and pushed[-1]["url"].startswith("http://"))
+
+        probe = socket.socket()
+        probe.settimeout(5)
+        try:
+            probe.connect(("127.0.0.1", port))
+            check("port_accepting", True)
+        except OSError:
+            check("port_accepting", False)
+        finally:
+            probe.close()
+
+        m._handle_settings_msg({"type": "set", "key": "git_proxy_enabled", "value": False})
+        check("app_state_disabled", m.app.git_proxy_enabled is False)
+        check("server_stopped", not m._git_proxy.is_running)
+        check("status_reads_off", sent[-1]["status"]["git_proxy"]["text"] == "Off")
+
+        probe = socket.socket()
+        probe.settimeout(5)
+        try:
+            probe.connect(("127.0.0.1", port))
+            check("port_closed_after_disable", False)
+            probe.close()
+        except OSError:
+            check("port_closed_after_disable", True)
     finally:
-        probe.close()
-
-    dpg.set_value(checkbox, False)
-    m.cb_git_proxy_enabled(checkbox, False)
-    check("app_state_disabled", m.app.git_proxy_enabled is False)
-    check("server_stopped", not m._git_proxy.is_running)
-    check("status_reads_off", dpg.get_value("git_proxy_status") == "Off")
-
-    probe = socket.socket()
-    probe.settimeout(5)
-    try:
-        probe.connect(("127.0.0.1", port))
-        check("port_closed_after_disable", False)
-        probe.close()
-    except OSError:
-        check("port_closed_after_disable", True)
-    dpg.delete_item(win)
+        m._settings_send = real_send
 
 
 def test_port_change_rebinds_while_enabled():
     first, second = _free_port(), _free_port()
     m.app.git_proxy_port = first
     m.app.git_proxy_enabled = True
-    win = _open_settings()
     try:
         m._apply_git_proxy()
         check("bound_first_port", m._git_proxy.port == first)
@@ -182,7 +137,6 @@ def test_port_change_rebinds_while_enabled():
     finally:
         m.app.git_proxy_enabled = False
         m._apply_git_proxy()
-        dpg.delete_item(win)
 
 
 def test_serves_the_live_watched_folders():
@@ -229,7 +183,7 @@ def main():
     try:
         test_defaults_are_off()
         test_port_clamping()
-        test_settings_window_renders_the_section()
+        test_settings_status_reads_off_when_disabled()
         test_toggle_starts_and_stops_the_server()
         test_port_change_rebinds_while_enabled()
         test_serves_the_live_watched_folders()

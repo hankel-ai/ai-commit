@@ -1,6 +1,6 @@
-"""The Kiro CLI path is set in the Settings window and used by Generate.
+"""The Kiro CLI path set in the Settings window is used by Generate.
 
-Real Dear PyGui items, a real settings file, a real git repo and a real executable
+Real "set" messages as the Settings window sends them, a real settings file, a real git repo and a real executable
 stub. Only the model behind kiro-cli is stubbed. The environment variable points at
 a stub that fails, so a Generate that ignored the setting would report the failure.
 
@@ -54,26 +54,25 @@ def write_stub(folder, name, reply, exit_code=0):
 
 
 def open_settings():
-    if dpg.does_item_exist("settings_window"):
-        dpg.delete_item("settings_window")
-    m.cb_open_settings(None, None)
+    """What the Settings window is handed when it opens."""
+    return m._settings_values(), m._settings_status()
 
 
 def type_path(value):
-    dpg.set_value("settings_kiro_cli", value)
-    m.cb_kiro_cli_changed("settings_kiro_cli", value)
+    """The window sends the field's text as a "set" message."""
+    m._handle_settings_msg({"type": "set", "key": "kiro_cli_path", "value": value})
 
 
 def status():
-    return dpg.get_value("settings_kiro_status")
+    return m._kiro_status()["text"]
 
 
 def test_field_shows_the_saved_path_and_what_it_resolves_to(tmp):
     good = write_stub(tmp, "good", "x")
     m.app.kiro_cli_path = good
-    open_settings()
-    check("field shows the saved path", dpg.get_value("settings_kiro_cli") == good)
-    check("status names the exe in use", status() == f"Using: {good}")
+    values, init_status = open_settings()
+    check("field shows the saved path", values["kiro_cli_path"] == good)
+    check("status names the exe in use", init_status["kiro"]["text"] == f"Using: {good}")
 
 
 def test_typing_updates_status_and_app(tmp):

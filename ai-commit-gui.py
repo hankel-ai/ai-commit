@@ -83,6 +83,13 @@ from tray_animation import (
 )
 from ai_commit_core import (
     STATUS_LABELS,
+    IDENTITY_BLOCK,
+    apply_identity_fix,
+    sync_identity_config,
+    check_commit_identity,
+    check_push_identity,
+    get_git_global_user,
+    normalize_identity_pins,
     KiroCliError,
     resolve_kiro_cli,
     OllamaError,
@@ -124,6 +131,7 @@ from ai_commit_core import (
     is_repo_active,
     is_folder_recent,
     get_remote_url,
+    remote_host,
     get_status,
     read_status,
     read_status_branch,
@@ -390,6 +398,10 @@ class AppState:
     show_pull_prompt_on_next_poll: bool = False  # transient: "Pull" button clicked, refresh pending, show prompt on poll_result
     git_proxy_enabled: bool = False  # serve the watched repos read-only over LAN HTTP
     git_proxy_port: int = git_proxy.DEFAULT_PORT
+    identity_guard_enabled: bool = True  # check commit/push identity (pinned host = block, others = warn)
+    identity_pins: list = field(default_factory=list)  # [{"host","name","email","login"}] -- per PC, not synced
+    # Last sync_identity_config() outcome, shown in Settings.
+    identity_status: dict = field(default_factory=lambda: {"lines": [], "ok": True})
     typeahead_buf: str = ""  # transient: typed text filtering the repo list (contains match)
     typeahead_miss: bool = False  # the current buffer matched nothing (shown in the toolbar)
 
@@ -491,6 +503,8 @@ def _save_settings():
             "sort_by_date": app.sort_by_date,
             "git_proxy_enabled": app.git_proxy_enabled,
             "git_proxy_port": app.git_proxy_port,
+            "identity_guard_enabled": app.identity_guard_enabled,
+            "identity_pins": normalize_identity_pins(app.identity_pins),
         }
         _SETTINGS_FILE.write_text(json.dumps(data))
     except Exception:
@@ -1447,6 +1461,35 @@ def _launch_workflow_viewer_dispatch(repo_name, wf_id, wf_name, after_iso):
     })
 
 
+def _identity_gate(repo_name, cwd, commit=False, host=None):
+    """Run the identity guard before a commit and/or push. True = go ahead.
+
+    *commit* adds the commit-time check (would a new commit be made as the
+    right identity?) to the push-time check (are the unpushed commits?).
+    *host* overrides origin's host, for Create-Remote. Any finding is posted
+    as one ``identity_check`` message; only a BLOCK result stops the caller --
+    a WARN is shown and the operation carries on. Disabled guard = no git work.
+    """
+    if not getattr(app, "identity_guard_enabled", True):
+        return True
+    pins = getattr(app, "identity_pins", [])
+    results = []
+    if commit:
+        results.append(check_commit_identity(cwd, pins, host=host))
+    results.append(check_push_identity(cwd, pins, host=host))
+    results = [r for r in results if r]
+    if not results:
+        return True
+    blocked = any(r["level"] == IDENTITY_BLOCK for r in results)
+    for r in results:
+        activity_log.log_event(
+            ("Identity guard BLOCKED: " if r["level"] == IDENTITY_BLOCK
+             else "Identity guard warning: ") + r["message"],
+            repo=repo_name, category=activity_log.CAT_GIT)
+    ui_queue.put(("identity_check", repo_name, results))
+    return not blocked
+
+
 def bg_commit_and_push(repo_name, message):
     """Commit and push for a repo. Posts result to ui_queue."""
     rs = app.repos.get(repo_name)
@@ -1458,6 +1501,8 @@ def bg_commit_and_push(repo_name, message):
             if current != rs.gen_entries:
                 ui_queue.put(("commit_result", repo_name, False, False, "STALE"))
                 return
+        if not _identity_gate(repo_name, str(rs.path), commit=True):
+            return
         activity_log.log_event("Commit and push", repo=repo_name)
         committed, pushed, detail = do_commit_and_push(rs.path, message)
         ui_queue.put(("commit_result", repo_name, committed, pushed, detail))
@@ -1469,6 +1514,8 @@ def bg_push_set_upstream(repo_name, branch):
     """Push with --set-upstream for a branch that has no remote tracking."""
     rs = app.repos.get(repo_name)
     if not rs:
+        return
+    if not _identity_gate(repo_name, str(rs.path)):
         return
     rc, out, err = run_git(["push", "--set-upstream", "origin", branch],
                            cwd=str(rs.path))
@@ -1495,6 +1542,8 @@ def bg_push_only(repo_name):
     rs = app.repos.get(repo_name)
     if not rs:
         return
+    if not _identity_gate(repo_name, str(rs.path)):
+        return
     activity_log.log_event(
         "Push (retry existing commits)",
         repo=repo_name, category=activity_log.CAT_GIT,
@@ -1517,6 +1566,8 @@ def bg_push_override(repo_name, branch=""):
     """
     rs = app.repos.get(repo_name)
     if not rs:
+        return
+    if not _identity_gate(repo_name, str(rs.path)):
         return
     args = ["push", "-o", SECRET_PUSH_SKIP_OPTION]
     if branch:
@@ -1579,6 +1630,10 @@ def bg_create_remote(repo_name, account, visibility):
     try:
         cwd = str(rs.path)
         folder_name = rs.path.name
+        if not _identity_gate(repo_name, cwd, host="github.com"):
+            ui_queue.put(("create_remote_result", repo_name, False,
+                          "blocked by the identity guard"))
+            return
         kwargs = {}
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -1668,6 +1723,11 @@ def bg_create_gitlab_remote(repo_name, url):
         return
     cwd = str(rs.path)
     try:
+        # origin doesn't exist yet: the whole history is about to go to url's host.
+        if not _identity_gate(repo_name, cwd, host=remote_host(url)):
+            ui_queue.put(("create_remote_result", repo_name, False,
+                          "blocked by the identity guard"))
+            return
         rc, _, err = run_git(["remote", "add", "origin", url], cwd=cwd)
         if rc != 0:
             # Typically "remote origin already exists" -- not ours to remove.
@@ -1883,66 +1943,18 @@ def cb_pause(sender, app_data):
         trigger_poll()
 
 
-def cb_poll_changed(sender, app_data):
-    try:
-        val = int(dpg.get_value(sender))
-        if val < 5:
-            val = 5
-        app.poll_interval = val
-        _save_settings()
-    except (ValueError, TypeError):
-        pass
-
-
-def cb_poll_threads(sender, app_data):
-    """How many repos a poll cycle works on at once (see _run_poll_batch)."""
-    try:
-        val = int(dpg.get_value(sender))
-        app.poll_threads = max(1, min(POLL_FANOUT_MAX, val))
-        _save_settings()
-    except (ValueError, TypeError):
-        pass
-
-
-def cb_auto_generate(sender, app_data):
-    app.auto_generate = dpg.get_value(sender)
-    _save_settings()
-
-
-def cb_always_on_top(sender, app_data):
-    app.always_on_top = dpg.get_value(sender)
-    _set_topmost(app.always_on_top)
-    _save_settings()
-
-
-def cb_actions_popup(sender, app_data):
-    app.actions_popup_enabled = dpg.get_value(sender)
-    _save_settings()
-
-
-def cb_chime_on_completion(sender, app_data):
-    app.chime_on_completion = dpg.get_value(sender)
-    _save_settings()
-
-
-def cb_test_chime(sender, app_data, user_data):
-    chime.play(success=bool(user_data))
-
-
-def cb_show_non_git(sender, app_data):
-    app.show_non_git_folders = dpg.get_value(sender)
-    _save_settings()
-    trigger_poll()
-
-
 def cb_recent_only(sender, app_data):
     """Toggle the recency display filter. Re-renders from the last poll payload --
     applying/removing the filter costs no git work."""
-    app.recent_only = bool(dpg.get_value(sender))
-    # Keep the toolbar + Settings checkboxes in sync (whichever was toggled).
-    for tag in ("recent_only_cb", "settings_recent_only_cb"):
-        if tag != sender and dpg.does_item_exist(tag):
-            dpg.set_value(tag, app.recent_only)
+    _set_recent_only(bool(dpg.get_value(sender)))
+    _settings_send({"type": "values", "values": {"recent_only": app.recent_only}})
+
+
+def _set_recent_only(value):
+    """Shared by the toolbar checkbox and the Settings window."""
+    app.recent_only = bool(value)
+    if dpg.does_item_exist("recent_only_cb"):
+        dpg.set_value("recent_only_cb", app.recent_only)
     _save_settings()
     if app.last_results or app.last_non_git:
         rebuild_repos_ui(app.last_results, app.last_non_git, preserve_open=True)
@@ -1972,35 +1984,12 @@ def cb_sort_by_date(sender, app_data):
         trigger_poll()
 
 
-def cb_recent_days(sender, app_data):
-    try:
-        val = int(dpg.get_value(sender))
-        if val < 1:
-            val = 1
-        app.recent_days = val
-        _save_settings()
-        trigger_poll()  # window changed -> re-tier and re-filter
-    except (ValueError, TypeError):
-        pass
-
-
-def cb_idle_interval(sender, app_data):
-    try:
-        val = int(dpg.get_value(sender))
-        if val < 60:
-            val = 60
-        app.idle_poll_interval = val
-        _save_settings()
-        trigger_poll()
-    except (ValueError, TypeError):
-        pass
-
-
 # ---------------------------------------------------------------------------
 # Git proxy (read-only LAN git remote)
 # ---------------------------------------------------------------------------
 
 _git_proxy = None  # git_proxy.GitProxy, created on first enable
+_git_proxy_status_text = "Off"  # last _apply_git_proxy() result, shown in Settings
 _GIT_PROXY_PORT_MIN = 1024
 _GIT_PROXY_PORT_MAX = 65535
 
@@ -2020,8 +2009,8 @@ def _apply_git_proxy():
     """Start or stop the LAN git proxy to match ``app.git_proxy_enabled``.
 
     The single place the server is started or stopped, so toggling the setting
-    takes effect immediately with no restart. Main thread only -- it writes the
-    Settings status line.
+    takes effect immediately with no restart. Main thread only. The returned
+    status text is what Settings shows.
     """
     global _git_proxy
     status = ""
@@ -2044,8 +2033,8 @@ def _apply_git_proxy():
             _git_proxy.stop()
             activity_log.log_event("Git proxy disabled")
         status = "Off"
-    if dpg.does_item_exist("git_proxy_status"):
-        dpg.set_value("git_proxy_status", status)
+    global _git_proxy_status_text
+    _git_proxy_status_text = status
     return status
 
 
@@ -2055,154 +2044,283 @@ def _git_proxy_clone_url():
     return ""
 
 
-def cb_git_proxy_enabled(sender, app_data):
-    app.git_proxy_enabled = bool(dpg.get_value(sender))
-    _save_settings()
-    _apply_git_proxy()
+# ---------------------------------------------------------------------------
+# Settings window -- a separate process (settings_window.py)
+# ---------------------------------------------------------------------------
+#
+# Dear PyGui allows one OS window per process, so Settings is its own process,
+# talking JSON lines over its stdin/stdout (protocol in settings_window.py).
+# This process stays the only writer of the settings file and the only place a
+# setting takes effect: every edit arrives as ("settings_msg", {"type": "set"})
+# on ui_queue and goes through apply_setting().
+
+_SETTINGS_SCRIPT = Path(__file__).resolve().parent / "settings_window.py"
+_settings_proc = None
+_settings_lock = threading.Lock()
 
 
-def cb_git_proxy_port(sender, app_data):
-    port = _clamp_proxy_port(dpg.get_value(sender))
-    if port == app.git_proxy_port:
+def _settings_values():
+    """Every value the Settings window edits, as plain JSON types."""
+    return {
+        "poll_interval": app.poll_interval,
+        "poll_threads": app.poll_threads,
+        "idle_poll_interval": app.idle_poll_interval,
+        "auto_generate": app.auto_generate,
+        "always_on_top": app.always_on_top,
+        "actions_popup_enabled": app.actions_popup_enabled,
+        "chime_on_completion": app.chime_on_completion,
+        "run_at_startup": _is_startup_enabled(),
+        "ollama_url": app.ollama_url,
+        "api_key": app.api_key,
+        "kiro_cli_path": app.kiro_cli_path,
+        "git_proxy_enabled": app.git_proxy_enabled,
+        "git_proxy_port": app.git_proxy_port,
+        "identity_guard_enabled": app.identity_guard_enabled,
+        "identity_pins": normalize_identity_pins(app.identity_pins),
+        "show_non_git_folders": app.show_non_git_folders,
+        "recent_only": app.recent_only,
+        "recent_days": app.recent_days,
+    }
+
+
+def _kiro_status():
+    """Which kiro-cli Generate will run, or why it can't find one."""
+    try:
+        return {"text": f"Using: {resolve_kiro_cli(app.kiro_cli_path)}", "error": False}
+    except KiroCliError as exc:
+        return {"text": str(exc).splitlines()[0], "error": True}
+
+
+def _settings_status():
+    g_name, g_email = get_git_global_user()
+    return {
+        "kiro": _kiro_status(),
+        "git_proxy": {"text": _git_proxy_status_text, "url": _git_proxy_clone_url()},
+        "identity": app.identity_status,
+        "global_identity": (f"{g_name} <{g_email}>" if g_email else ""),
+    }
+
+
+def _settings_running():
+    return _settings_proc is not None and _settings_proc.poll() is None
+
+
+def _settings_send(msg):
+    """Send one message to the Settings window, if it is open. Never raises."""
+    proc = _settings_proc
+    if proc is None or proc.poll() is not None:
         return
-    app.git_proxy_port = port
-    _save_settings()
-    _apply_git_proxy()
+    try:
+        with _settings_lock:
+            proc.stdin.write(json.dumps(msg) + "\n")
+            proc.stdin.flush()
+    except (OSError, ValueError):
+        pass
 
 
-def cb_git_proxy_copy_url(sender, app_data):
-    url = _git_proxy_clone_url()
-    if url:
-        dpg.set_clipboard_text(url)
+def _settings_reader(proc):
+    """Background thread: forward the window's messages to the main thread."""
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ui_queue.put(("settings_msg", json.loads(line)))
+            except ValueError:
+                pass
+    except (OSError, ValueError):
+        pass
+    ui_queue.put(("settings_closed", proc.pid))
 
 
-def cb_open_settings(sender, app_data):
-    """Open the settings popup window."""
-    win_tag = "settings_window"
-    if dpg.does_item_exist(win_tag):
-        dpg.focus_item(win_tag)
+def _focus_process_window(pid):
+    """Bring a visible top-level window of process *pid* to the front."""
+    if sys.platform != "win32":
         return
-    with dpg.window(
-        label="Settings",
-        tag=win_tag,
-        width=340, height=560,
-        no_collapse=True,
-        on_close=lambda s, a, u: (
-            dpg.delete_item(s) if dpg.does_item_exist(s) else None
-        ),
-    ):
-        dpg.add_text("Polling", color=COL_ACCENT)
-        with dpg.group(horizontal=True):
-            dpg.add_text("Poll interval:", color=COL_DIM)
-            dpg.add_input_int(default_value=app.poll_interval, width=80,
-                              min_value=5, min_clamped=True, max_value=600, max_clamped=True,
-                              callback=cb_poll_changed, step=0)
-            dpg.add_text("s", color=COL_DIM)
-        with dpg.group(horizontal=True):
-            dpg.add_text("Poll threads:", color=COL_DIM)
-            dpg.add_input_int(default_value=app.poll_threads, width=80,
-                              min_value=1, min_clamped=True,
-                              max_value=POLL_FANOUT_MAX, max_clamped=True,
-                              callback=cb_poll_threads, step=0)
-        dpg.add_text("8 is the practical max on Windows -- process spawn,\n"
-                     "not bandwidth, is the limit", color=COL_DIM)
-        dpg.add_spacer(height=6)
-        dpg.add_text("Behavior", color=COL_ACCENT)
-        dpg.add_checkbox(label="Auto-generate commit messages",
-                         default_value=app.auto_generate,
-                         callback=cb_auto_generate)
-        dpg.add_checkbox(label="Always on top",
-                         default_value=app.always_on_top,
-                         callback=cb_always_on_top)
-        dpg.add_checkbox(label="Actions popup after push",
-                         default_value=app.actions_popup_enabled,
-                         callback=cb_actions_popup)
-        dpg.add_checkbox(label="Chime when workflow completes",
-                         default_value=app.chime_on_completion,
-                         callback=cb_chime_on_completion)
-        with dpg.group(horizontal=True):
-            dpg.add_spacer(width=20)
-            dpg.add_button(label="Test OK",
-                           callback=cb_test_chime, user_data=True)
-            dpg.add_button(label="Test Fail",
-                           callback=cb_test_chime, user_data=False)
-        if sys.platform == "win32":
-            dpg.add_checkbox(label="Run at startup",
-                             default_value=_is_startup_enabled(),
-                             callback=cb_start_with_windows)
-        dpg.add_spacer(height=6)
-        dpg.add_text("Provider", color=COL_ACCENT)
-        with dpg.group(horizontal=True):
-            dpg.add_text("Base URL:", color=COL_DIM)
-            dpg.add_input_text(tag="settings_ollama_url",
-                               default_value=app.ollama_url, width=-1,
-                               callback=cb_ollama_url_changed, on_enter=True,
-                               hint="http://localhost:11434")
-        with dpg.group(horizontal=True):
-            dpg.add_text("API key:", color=COL_DIM)
-            dpg.add_input_text(tag="settings_api_key", default_value=app.api_key,
-                               width=-1, password=True, on_enter=True,
-                               callback=cb_api_key_changed,
-                               hint="litellm only; blank = AI_COMMIT_API_KEY")
-        with dpg.group(horizontal=True):
-            dpg.add_text("Kiro CLI:", color=COL_DIM)
-            dpg.add_input_text(tag="settings_kiro_cli",
-                               default_value=app.kiro_cli_path, width=-1,
-                               callback=cb_kiro_cli_changed,
-                               hint="Blank = find automatically")
-        dpg.add_text("", tag="settings_kiro_status", color=COL_DIM, wrap=310)
-        _update_kiro_cli_status()  # fills in the status line just created
-        dpg.add_spacer(height=6)
-        dpg.add_text("Git Proxy (LAN)", color=COL_ACCENT)
-        dpg.add_checkbox(label="Serve watched repos over LAN (read-only)",
-                         default_value=app.git_proxy_enabled,
-                         callback=cb_git_proxy_enabled)
-        with dpg.group(horizontal=True):
-            dpg.add_text("Port:", color=COL_DIM)
-            dpg.add_input_int(default_value=app.git_proxy_port, width=90,
-                              min_value=_GIT_PROXY_PORT_MIN, min_clamped=True,
-                              max_value=_GIT_PROXY_PORT_MAX, max_clamped=True,
-                              callback=cb_git_proxy_port, step=0)
-            dpg.add_button(label="Copy URL", callback=cb_git_proxy_copy_url)
-        dpg.add_text("", tag="git_proxy_status", color=COL_DIM, wrap=310)
-        dpg.add_text("Others can 'git clone <url>/<repo>.git'. Fetch/pull only --\n"
-                     "pushing is refused. No authentication: LAN clients only.",
-                     color=COL_DIM)
-        _apply_git_proxy()  # fills in the status line just created
-        dpg.add_spacer(height=6)
-        dpg.add_text("Display", color=COL_ACCENT)
-        dpg.add_checkbox(label="Show non-git folders",
-                         default_value=app.show_non_git_folders,
-                         callback=cb_show_non_git)
-        dpg.add_checkbox(label="Recent repos only", tag="settings_recent_only_cb",
-                         default_value=app.recent_only,
-                         callback=cb_recent_only)
-        with dpg.group(horizontal=True):
-            dpg.add_text("Recent window:", color=COL_DIM)
-            dpg.add_input_int(default_value=app.recent_days, width=80,
-                              min_value=1, min_clamped=True,
-                              max_value=3650, max_clamped=True,
-                              callback=cb_recent_days, step=0)
-            dpg.add_text("days", color=COL_DIM)
-        with dpg.group(horizontal=True):
-            dpg.add_text("Idle repo poll:", color=COL_DIM)
-            dpg.add_input_int(default_value=app.idle_poll_interval, width=80,
-                              min_value=60, min_clamped=True,
-                              max_value=86400, max_clamped=True,
-                              callback=cb_idle_interval, step=0)
-            dpg.add_text("s", color=COL_DIM)
-        dpg.add_spacer(height=10)
-        def _save_and_close():
-            if dpg.does_item_exist("settings_ollama_url"):
-                val = dpg.get_value("settings_ollama_url").strip()
-                if val:
-                    app.ollama_url = val
+    found = []
+
+    def _enum_cb(hwnd, _lparam):
+        owner = ctypes.wintypes.DWORD()
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and _user32.IsWindowVisible(hwnd):
+            found.append(hwnd)
+        return True
+
+    _user32.EnumWindows(WNDENUMPROC(_enum_cb), None)
+    for hwnd in found:
+        if _user32.IsIconic(hwnd):
+            _user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        _user32.SetForegroundWindow(hwnd)
+
+
+def _launch_settings():
+    """Start the Settings process and hand it the current values."""
+    global _settings_proc
+    exe = sys.executable
+    if sys.platform == "win32" and exe.lower().endswith("python.exe"):
+        pw = exe[:-len("python.exe")] + "pythonw.exe"
+        if os.path.isfile(pw):
+            exe = pw
+    try:
+        pos = dpg.get_viewport_pos()
+        anchor = {"x": int(pos[0]), "y": int(pos[1]),
+                  "w": dpg.get_viewport_width(), "h": dpg.get_viewport_height()}
+    except Exception:
+        anchor = {}
+    init = {"type": "init", "values": _settings_values(),
+            "status": _settings_status(), "anchor": anchor,
+            "limits": {"poll_threads_max": POLL_FANOUT_MAX},
+            "startup_supported": sys.platform == "win32"}
+    try:
+        proc = subprocess.Popen(
+            [exe, str(_SETTINGS_SCRIPT)], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1,
+            cwd=str(_SETTINGS_SCRIPT.parent))
+    except OSError as exc:
+        activity_log.log_event("Failed to open Settings", detail=str(exc),
+                               category=activity_log.CAT_ERROR)
+        return None
+    _settings_proc = proc
+    threading.Thread(target=_settings_reader, args=(proc,), daemon=True).start()
+    _settings_send(init)
+    return proc
+
+
+def _close_settings(timeout=3.0):
+    """Close the Settings window (EOF on its stdin), killing it if it hangs."""
+    global _settings_proc
+    proc, _settings_proc = _settings_proc, None
+    if proc is None:
+        return
+    try:
+        proc.stdin.close()
+    except (OSError, ValueError):
+        pass
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def _forget_settings_proc(pid):
+    """The window with *pid* exited (its stdout hit EOF)."""
+    global _settings_proc
+    if _settings_proc is not None and _settings_proc.pid == pid:
+        _settings_proc = None
+
+
+def cb_open_settings(sender=None, app_data=None):
+    """Open Settings in its own window, or bring the open one to the front."""
+    if _settings_running():
+        _focus_process_window(_settings_proc.pid)
+        return
+    _launch_settings()
+
+
+def _handle_settings_msg(msg):
+    if msg.get("type") == "set":
+        apply_setting(msg.get("key"), msg.get("value"))
+
+
+def _int_setting(value, lo, hi=None):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    value = max(lo, value)
+    return min(hi, value) if hi is not None else value
+
+
+def apply_setting(key, value):
+    """Make one setting take effect, persist it, and refresh any status line.
+
+    The single entry point for edits from the Settings window. Out-of-range
+    numbers are clamped and junk is ignored, exactly as the old in-window
+    callbacks did.
+    """
+    status = {}
+    if key in ("auto_generate", "actions_popup_enabled", "chime_on_completion",
+               "identity_guard_enabled"):
+        setattr(app, key, bool(value))
+    elif key == "always_on_top":
+        app.always_on_top = bool(value)
+        _set_topmost(app.always_on_top)
+    elif key == "run_at_startup":
+        _set_startup_enabled(bool(value))
+        return
+    elif key in ("poll_interval", "poll_threads", "idle_poll_interval", "recent_days"):
+        lo, hi = {"poll_interval": (5, 600), "poll_threads": (1, POLL_FANOUT_MAX),
+                  "idle_poll_interval": (60, 86400), "recent_days": (1, 3650)}[key]
+        number = _int_setting(value, lo, hi)
+        if number is None:
+            return
+        setattr(app, key, number)
+        if key in ("idle_poll_interval", "recent_days"):
             _save_settings()
-            if dpg.does_item_exist("settings_window"):
-                dpg.delete_item("settings_window")
+            trigger_poll()  # re-tier and re-filter
+            return
+    elif key == "ollama_url":
+        value = str(value or "").strip()
+        if not value:
+            return
+        app.ollama_url = value
+    elif key == "api_key":
+        app.api_key = str(value or "").strip()
+    elif key == "kiro_cli_path":
+        app.kiro_cli_path = str(value or "").strip().strip('"').strip()
+        status["kiro"] = _kiro_status()
+    elif key == "git_proxy_enabled":
+        app.git_proxy_enabled = bool(value)
+        _save_settings()
+        _apply_git_proxy()
+        status["git_proxy"] = {"text": _git_proxy_status_text,
+                               "url": _git_proxy_clone_url()}
+    elif key == "git_proxy_port":
+        port = _clamp_proxy_port(value)
+        if port == app.git_proxy_port:
+            return
+        app.git_proxy_port = port
+        _save_settings()
+        _apply_git_proxy()
+        status["git_proxy"] = {"text": _git_proxy_status_text,
+                               "url": _git_proxy_clone_url()}
+    elif key == "identity_pins":
+        app.identity_pins = normalize_identity_pins(value)
+        _save_settings()
+        _start_identity_sync()
+        return
+    elif key == "show_non_git_folders":
+        app.show_non_git_folders = bool(value)
+        _save_settings()
+        trigger_poll()
+        return
+    elif key == "recent_only":
+        _set_recent_only(value)
+        if app.last_results or app.last_non_git:
+            rebuild_repos_ui(app.last_results, app.last_non_git, preserve_open=True)
+        else:
+            trigger_poll()
+        return
+    else:
+        return
+    _save_settings()
+    if status:
+        _settings_send({"type": "status", "status": status})
 
-        save_btn = dpg.add_button(label="Save & Close", callback=_save_and_close)
-        dpg.bind_item_theme(save_btn, green_btn_theme)
+
+def _start_identity_sync():
+    """Write the identity pins into git config (background; see core)."""
+    pins = [dict(p) for p in normalize_identity_pins(app.identity_pins)]
+    executor.submit(bg_identity_sync, pins)
+
+
+def bg_identity_sync(pins):
+    try:
+        result = sync_identity_config(pins)
+    except Exception as exc:  # never kill the worker; report instead
+        result = {"ok": False, "hosts": {}, "lines": [f"Identity sync failed: {exc}"]}
+    ui_queue.put(("identity_sync", result))
 
 
 def cb_generate(sender, app_data, user_data):
@@ -2867,6 +2985,133 @@ def _show_push_rule_prompt(repo_name, detail, branch=""):
             )
 
 
+IDENTITY_POPUP_MAX_COMMITS = 10
+
+
+def _show_identity_prompt(repo_name, results):
+    """Show what the identity guard found -- and the commands that fix it.
+
+    *results* are ``check_commit_identity`` / ``check_push_identity`` dicts.
+    A BLOCK means nothing was committed or pushed; a WARN means the operation
+    went ahead. Apply Fix (config-only fixes) runs ``apply_identity_fix`` and
+    re-checks; Copy Fix puts the commands -- including history rewrites, which
+    are never run for the user -- on the clipboard.
+    """
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    blocked = any(r["level"] == IDENTITY_BLOCK for r in results)
+    win_tag = dpg.generate_uuid()
+    pop_w = 640
+    lines = sum(2 + len(r.get("fix", "").split("\n"))
+                + min(len(r.get("commits", [])), IDENTITY_POPUP_MAX_COMMITS)
+                for r in results)
+    pop_h = min(520, 130 + 18 * lines)
+    click_pos = dpg.get_mouse_pos()
+    px = max(0, int(click_pos[0]) - pop_w // 2)
+    py = max(0, int(click_pos[1]))
+    title = "Identity Check Blocked" if blocked else "Identity Warning"
+    fixes = "\n".join(r["fix"] for r in results if r.get("fix"))
+
+    with dpg.window(
+        label=f"{title} -- {rs.name}",
+        tag=win_tag,
+        width=pop_w, height=pop_h,
+        pos=(px, py),
+        no_collapse=True,
+        on_close=lambda s, a, u: (
+            dpg.delete_item(s) if dpg.does_item_exist(s) else None
+        ),
+    ):
+        for r in results:
+            color = COL_RED if r["level"] == IDENTITY_BLOCK else COL_YELLOW
+            dpg.add_text(r["message"], color=color, wrap=pop_w - 40)
+            commits = r.get("commits", [])
+            for c in commits[:IDENTITY_POPUP_MAX_COMMITS]:
+                dpg.add_text(
+                    f"  {c['sha'][:8]}  author {c['author_name']} "
+                    f"<{c['author_email']}>  committer {c['committer_name']} "
+                    f"<{c['committer_email']}>", color=COL_DIM)
+            if len(commits) > IDENTITY_POPUP_MAX_COMMITS:
+                dpg.add_text(f"  +{len(commits) - IDENTITY_POPUP_MAX_COMMITS} more",
+                             color=COL_DIM)
+            if r.get("fix"):
+                dpg.add_text("Fix:", color=COL_DIM)
+                dpg.add_text(r["fix"], color=COL_DIM, wrap=pop_w - 40)
+            dpg.add_spacer(height=4)
+        if blocked:
+            dpg.add_text("Nothing was committed or pushed. Fix the identity "
+                         "and try again.", color=COL_DIM, wrap=pop_w - 40)
+        else:
+            dpg.add_text("This is a warning only -- the commit/push went ahead.",
+                         color=COL_DIM, wrap=pop_w - 40)
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True):
+            if _identity_fixable(results):
+                fix_btn = dpg.add_button(
+                    label="Apply Fix",
+                    user_data=(repo_name, results, win_tag),
+                    callback=_cb_apply_identity_fix,
+                )
+                dpg.bind_item_theme(fix_btn, green_btn_theme)
+            if fixes:
+                dpg.add_button(
+                    label="Copy Fix",
+                    user_data=fixes,
+                    callback=lambda s, a, u: dpg.set_clipboard_text(u),
+                )
+            dpg.add_button(
+                label="Close",
+                user_data=win_tag,
+                callback=lambda s, a, u: (
+                    dpg.delete_item(u) if dpg.does_item_exist(u) else None
+                ),
+            )
+
+
+def _identity_fixable(results):
+    """True when a result's fix is config-only (Apply Fix can do it).
+
+    History rewrites (push results) are copy-only: they rewrite commits.
+    """
+    return any(r.get("kind") == "commit" and (r.get("fix_args") or r.get("needs_sync"))
+               for r in results)
+
+
+def _cb_apply_identity_fix(sender, app_data, user_data):
+    repo_name, results, win_tag = user_data
+    if dpg.does_item_exist(win_tag):
+        dpg.delete_item(win_tag)
+    executor.submit(bg_apply_identity_fix, repo_name, results)
+
+
+def bg_apply_identity_fix(repo_name, results):
+    """Apply config-only identity fixes, then re-check; reports via ui_queue."""
+    rs = app.repos.get(repo_name)
+    if not rs:
+        return
+    cwd = str(rs.path)
+    pins = [dict(p) for p in normalize_identity_pins(app.identity_pins)]
+    remaining = []
+    for r in results:
+        if r.get("kind") != "commit":
+            continue
+        try:
+            after = apply_identity_fix(cwd, r, pins)
+        except Exception as exc:
+            after = dict(r, message=f"Apply Fix failed: {exc}")
+        if after:
+            remaining.append(after)
+    if remaining:
+        for r in remaining:
+            activity_log.log_event("Identity fix incomplete: " + r["message"],
+                                   repo=repo_name, category=activity_log.CAT_GIT)
+    else:
+        activity_log.log_event("Identity fixed", repo=repo_name,
+                               category=activity_log.CAT_GIT)
+    ui_queue.put(("identity_fixed", repo_name, remaining))
+
+
 def _cb_confirm_secret_push(sender, app_data, user_data):
     """User confirmed pushing past secret push protection."""
     repo_name, branch, win_tag = user_data
@@ -3292,10 +3537,6 @@ def _set_startup_enabled(enabled):
         pass
 
 
-def cb_start_with_windows(sender, app_data):
-    _set_startup_enabled(dpg.get_value(sender))
-
-
 def cb_model_changed(sender, app_data):
     val = dpg.get_value(sender).strip()
     if val:
@@ -3313,32 +3554,6 @@ def cb_provider_changed(sender, app_data):
     app.provider = dpg.get_value(sender)
 
 
-def cb_ollama_url_changed(sender, app_data):
-    val = dpg.get_value(sender).strip()
-    if val:
-        app.ollama_url = val
-        _save_settings()
-
-
-def _update_kiro_cli_status():
-    """Show which kiro-cli Generate will run, or why it can't find one."""
-    try:
-        text, color = f"Using: {resolve_kiro_cli(app.kiro_cli_path)}", COL_DIM
-    except KiroCliError as exc:
-        text, color = str(exc).splitlines()[0], COL_RED
-    dpg.set_value("settings_kiro_status", text)
-    dpg.configure_item("settings_kiro_status", color=color)
-
-
-def cb_api_key_changed(sender, app_data):
-    app.api_key = dpg.get_value(sender).strip()
-    _save_settings()
-
-
-def cb_kiro_cli_changed(sender, app_data):
-    app.kiro_cli_path = dpg.get_value(sender).strip().strip('"').strip()
-    _update_kiro_cli_status()
-    _save_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -4866,6 +5081,52 @@ def process_queue():
                     dpg.configure_item(rs.input_tag, height=_height_for_text(display))
             update_repo_status(rs)
 
+        elif kind == "identity_check":
+            _, repo_name, results = msg
+            rs = app.repos.get(repo_name)
+            if not rs:
+                continue
+            blocks = [r for r in results if r["level"] == IDENTITY_BLOCK]
+            if blocks:
+                # Sticky, so the next poll rebuild doesn't wipe it. The commit
+                # message is left in place for a retry once the identity is fixed.
+                rs.gen_status = GenStatus.ERROR
+                rs.error_message = " ".join(r["message"] for r in blocks)
+                update_repo_status(rs)
+            _show_identity_prompt(repo_name, results)
+
+        elif kind == "identity_fixed":
+            _, repo_name, remaining = msg
+            rs = app.repos.get(repo_name)
+            if not rs:
+                continue
+            if remaining:
+                rs.gen_status = GenStatus.ERROR
+                rs.error_message = " ".join(r["message"] for r in remaining)
+                update_repo_status(rs)
+                _show_identity_prompt(repo_name, remaining)
+            else:
+                # Back to where the block found it: message kept, ready to retry.
+                rs.gen_status = GenStatus.DONE if rs.commit_message else GenStatus.IDLE
+                rs.error_message = ""
+                update_repo_status(rs)
+
+        elif kind == "settings_msg":
+            _handle_settings_msg(msg[1])
+
+        elif kind == "settings_closed":
+            _forget_settings_proc(msg[1])
+
+        elif kind == "identity_sync":
+            result = msg[1]
+            app.identity_status = {"lines": list(result.get("lines") or []),
+                                   "ok": bool(result.get("ok"))}
+            activity_log.log_event(
+                "Identity config " + ("applied" if result.get("ok") else "has problems"),
+                detail="; ".join(app.identity_status["lines"]) or "no pinned hosts",
+                category=activity_log.CAT_GIT if result.get("ok") else activity_log.CAT_ERROR)
+            _settings_send({"type": "status", "status": {"identity": app.identity_status}})
+
         elif kind == "commit_result":
             _, repo_name, committed, pushed, detail = msg
             rs = app.repos.get(repo_name)
@@ -5644,6 +5905,8 @@ def main():
         app.sort_by_date = saved.get("sort_by_date", False)
         app.git_proxy_enabled = bool(saved.get("git_proxy_enabled", False))
         app.git_proxy_port = _clamp_proxy_port(saved.get("git_proxy_port"))
+        app.identity_guard_enabled = bool(saved.get("identity_guard_enabled", True))
+        app.identity_pins = normalize_identity_pins(saved.get("identity_pins", []))
         if not folders_from_cli:
             # Support new list format and migrate old single-folder format
             saved_folders = saved.get("watched_folders", [])
@@ -5835,6 +6098,7 @@ def main():
     # Build initial folders list and poll
     _rebuild_folders_ui()
     _apply_git_proxy()  # off unless the user enabled it
+    _start_identity_sync()  # self-heals git config to match the pins
     trigger_poll()
 
     # Render loop
@@ -5901,6 +6165,7 @@ def main():
     _save_settings()
 
     # Cleanup
+    _close_settings()
     if _git_proxy is not None:
         _git_proxy.stop()
     executor.shutdown(wait=False)
