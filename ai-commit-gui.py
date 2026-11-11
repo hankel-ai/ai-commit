@@ -389,6 +389,7 @@ class AppState:
     active_gh_account: str = ""
     non_git_folders: dict = field(default_factory=dict)
     repo_overrides: dict = field(default_factory=dict)  # repo_key -> "pause" or "active"
+    pinned_repos: list = field(default_factory=list)  # repo_keys pinned to the top (display only; independent of repo_overrides, never changes polling)
     poll_pending: set = field(default_factory=set)  # repo_keys polled live this cycle that haven't reported back yet (streaming poll)
     poll_stream_dirty: bool = False  # a streamed repo result arrived -> rebuild on the next throttle tick
     poll_stream_last_rebuild: float = 0.0  # monotonic stamp of the last streaming rebuild
@@ -499,6 +500,7 @@ def _save_settings():
             "recent_days": app.recent_days,
             "idle_poll_interval": app.idle_poll_interval,
             "repo_overrides": app.repo_overrides,
+            "pinned_repos": list(app.pinned_repos),
             "visibility_cache": app.visibility_cache,
             "sort_by_date": app.sort_by_date,
             "git_proxy_enabled": app.git_proxy_enabled,
@@ -1892,15 +1894,45 @@ def cb_repo_right_click(sender, app_data, user_data):
     current = app.repo_overrides.get(repo_key, "")
     pause_label = "Remove Force Paused" if current == "pause" else "Force Paused"
     active_label = "Remove Force Active" if current == "active" else "Force Active"
+    pin_label = "Unpin" if _is_pinned(repo_key) else "Pin"
     with dpg.window(tag=menu_tag, no_title_bar=True, popup=True,
                     pos=(int(mx), int(my)), no_move=True, no_resize=True,
                     min_size=(1, 1), max_size=(300, 200)):
         dpg.add_button(label="Refresh", width=160,
                        callback=_ctx_refresh_repo, user_data=repo_key)
+        dpg.add_button(label=pin_label, width=160,
+                       callback=_ctx_toggle_pin, user_data=repo_key)
         dpg.add_button(label=pause_label, width=160,
                        callback=_ctx_toggle_force, user_data=(repo_key, "pause"))
         dpg.add_button(label=active_label, width=160,
                        callback=_ctx_toggle_force, user_data=(repo_key, "active"))
+
+
+def _is_pinned(repo_key):
+    """True when *repo_key* is pinned. getattr: render tests stub `app` with a
+    SimpleNamespace that predates pinning."""
+    return str(repo_key) in getattr(app, "pinned_repos", ())
+
+
+def _ctx_toggle_pin(sender, app_data, user_data):
+    """Context-menu action: pin/unpin a repo.
+
+    Display only -- a pin keeps the repo visible (past Recent only), sorts it
+    to the top and tints its header. It is independent of Force Active /
+    Force Paused and never changes how often the repo is polled, so this
+    re-renders from the last poll payload with no git work."""
+    repo_key = str(user_data)
+    if dpg.does_item_exist("repo_context_menu"):
+        dpg.delete_item("repo_context_menu")
+    if repo_key in app.pinned_repos:
+        app.pinned_repos = [k for k in app.pinned_repos if k != repo_key]
+    else:
+        app.pinned_repos = list(app.pinned_repos) + [repo_key]
+    _save_settings()
+    if app.last_results or app.last_non_git:
+        rebuild_repos_ui(app.last_results, app.last_non_git, preserve_open=True)
+    else:
+        trigger_poll()
 
 
 def _ctx_toggle_force(sender, app_data, user_data):
@@ -3756,12 +3788,19 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
         right_parts.append(f"[{rs.branch}]")
     if show_account:
         right_parts.append(f"[{rs.github_account}]")
+    repo_key = str(rs.path)
+    override = app.repo_overrides.get(repo_key, "")
+    pinned = _is_pinned(repo_key)
+    # A pinned header always shows the pin color, which hides the red/green
+    # Force Paused/Active tint -- so name the override in text instead.
+    if pinned and override == "pause":
+        right_parts.append("FORCE PAUSED")
+    elif pinned and override == "active":
+        right_parts.append("FORCE ACTIVE")
     if right_parts:
         pad = max(0, label_width - len(label))
         label += " " * pad + "  " + " ".join(right_parts)
 
-    repo_key = str(rs.path)
-    override = app.repo_overrides.get(repo_key, "")
     has_activity = change_count > 0 or rs.behind > 0 or rs.ahead > 0
     force_expand = repo_key in app.expand_on_next_build
     if force_expand:
@@ -3792,7 +3831,11 @@ def build_repo_section(rs, parent, label_width=0, preserve_open=False,
                                      user_data=repo_key)
     dpg.bind_item_handler_registry(rs.header_tag, rclick_handler)
 
-    if override == "pause":
+    # The pin color wins over Force Paused/Active and the public tint; a
+    # pinned repo's override is spelled out in the label instead (above).
+    if pinned:
+        dpg.bind_item_theme(rs.header_tag, "pinned_header_theme")
+    elif override == "pause":
         dpg.bind_item_theme(rs.header_tag, "force_pause_header_theme")
     elif override == "active":
         dpg.bind_item_theme(rs.header_tag, "force_active_header_theme")
@@ -4942,8 +4985,16 @@ def rebuild_repos_ui(results, non_git_results=None, clear_errors=False,
     recency_on = _recency_filter_on()
     now = time.time()
     hidden_count = 0
-    for rs in sorted(new_repos.values(), key=lambda r: (0 if r.entries else 1, -r.last_commit_ts) if app.sort_by_date else r.name.lower()):
-        if recency_on:
+    # Pinned repos render first (in either sort mode, ordered among themselves
+    # by the same key) and are exempt from the recency filter below. Pinning
+    # is display only: bg_poll_repos never looks at it.
+    def _render_sort_key(r):
+        base = ((0 if r.entries else 1, -r.last_commit_ts) if app.sort_by_date
+                else (r.name.lower(),))
+        return (0 if _is_pinned(r.path) else 1,) + base
+
+    for rs in sorted(new_repos.values(), key=_render_sort_key):
+        if recency_on and not _is_pinned(rs.path):
             repo_force_active = app.repo_overrides.get(str(rs.path), "") == "active"
             sticky_error = rs.gen_status == GenStatus.ERROR
             if (not repo_force_active and not sticky_error
@@ -5900,6 +5951,8 @@ def main():
         app.recent_days = saved.get("recent_days", 14)
         app.idle_poll_interval = saved.get("idle_poll_interval", 900)
         app.repo_overrides = saved.get("repo_overrides", {})
+        pins = saved.get("pinned_repos", [])
+        app.pinned_repos = [str(p) for p in pins] if isinstance(pins, list) else []
         vis = saved.get("visibility_cache", {})
         app.visibility_cache = dict(vis) if isinstance(vis, dict) else {}
         app.sort_by_date = saved.get("sort_by_date", False)
@@ -5985,6 +6038,15 @@ def main():
             dpg.add_theme_color(dpg.mvThemeCol_Header, (30, 65, 40))
             dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (40, 78, 50))
             dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (50, 90, 60))
+
+    # Pinned header theme (amber). Background colors only: a Text color bound
+    # to a collapsing header cascades into every child row (verified with a
+    # real viewport render), so pinning would recolor the whole repo body.
+    with dpg.theme(tag="pinned_header_theme"):
+        with dpg.theme_component(dpg.mvCollapsingHeader):
+            dpg.add_theme_color(dpg.mvThemeCol_Header, (85, 62, 12))
+            dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (100, 74, 18))
+            dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (115, 86, 24))
 
     # Public repo header theme (dark teal tint)
     with dpg.theme(tag="public_header_theme"):
